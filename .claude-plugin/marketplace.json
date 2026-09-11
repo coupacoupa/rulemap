@@ -1,13 +1,13 @@
 {
-  "name": "decision-tables",
+  "name": "rulemap",
   "owner": { "name": "SF", "email": "coupacoupa@live.com" },
-  "description": "Decision-table documentation and business-rule auditing for Claude Code.",
+  "description": "Business-rule mapping and spec planning with decision tables, for Claude Code.",
   "plugins": [
     {
-      "name": "decision-tables",
+      "name": "rulemap",
       "source": "./",
-      "description": "Map an app's business rules as decision tables, audit every branch for gaps, and keep the page in sync with the code.",
-      "version": "1.0.0"
+      "description": "Map an app's business rules as decision tables, from code or from a spec, and surface every combination nobody decided.",
+      "version": "1.1.0"
     }
   ]
 }

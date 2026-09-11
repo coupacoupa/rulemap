@@ -1,24 +1,28 @@
 #!/usr/bin/env node
-// Renders a decision-tables spec (JSON) into one standalone HTML page, and
+// Renders a rulemap spec (decision tables as JSON) into one standalone HTML page, and
 // reports which features went stale when the code they cite changed.
 // No dependencies: Node 18+ and git.
 
-import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, existsSync, readdirSync, statSync, mkdirSync, copyFileSync, rmSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { parseArgs } from "node:util";
 import path from "node:path";
 
-const USAGE = `decision-tables <command> <spec.json> [out.html] [options]
+const USAGE = `rulemap <command> <spec.json> [out.html] [options]
 
   validate <spec.json>              check the spec, its rules and its source citations
   deliver  <spec.json> [out.html]   validate, then write the HTML (default: meta.output beside the spec)
   stale    <spec.json> [out.html]   features whose cited code changed since the last deliver (exit 2)
   stamp    <spec.json>              pin meta.repository.revision to HEAD
   branches <spec.json> [--feature <id>]... [--changed]
-                                    every decision point in the cited code, to audit rule coverage
+                                    every decision point in the cited code or spec, to audit rule coverage
+  specs                             this project's specs, from its setup (exit 3 = not set up)
+  setup --dir <path> [--layout area|single] [--hook none|project|local]
+                                    where pages live, and whether a Stop hook keeps them in sync
 
-  --repo-root <dir>   repository root (default: git toplevel of the spec)
+  --repo-root <dir>   repository root (default: git toplevel of the spec, else the current directory)
   --stamp             deliver: pin the revision to HEAD first
   --json              machine-readable output`;
 
@@ -26,7 +30,7 @@ const TONES = new Set(["pos", "neg", "warn", "info", "neutral"]);
 const ANY = "*";
 // A value label like "ASSIGNED or EN_ROUTE" or "accepts / assigns" hides two conditions in one.
 const JOINED = /\s(or)\s|\s\/\s|,\s*or\b/i;
-const LOCK_ID = "decision-tables-lock";
+const LOCK_ID = "rulemap-lock";
 // Whose condition an input describes: the people who use the app, plus "system"
 // for what no person controls (payment gateway, cron, env flags). A spec names
 // its own in meta.actors; this is the fallback.
@@ -40,6 +44,10 @@ const SEVERITY = {
 };
 // An uncovered combination is a real gap in the code, so it defaults to major.
 const GAP_SEVERITY = "major";
+// A feature is mapped from code that exists, or planned from a spec that describes code to come.
+const STATUSES = new Set(["built", "planned"]);
+// Directories never worth hashing when there is no git to list files.
+const SKIP_DIRS = new Set([".git", "node_modules", ".next", ".turbo", "dist", "build", "coverage"]);
 
 // ---------------------------------------------------------------- helpers
 
@@ -73,19 +81,38 @@ function outPath(specPath, spec, explicit) {
 }
 
 // Every file whose change could alter a rule: the watched prefixes plus
-// everything cited. Hashed from the working tree, so uncommitted edits count.
-function watchedFiles(spec, root) {
+// everything cited, less the page's own spec and HTML (which often sit in a
+// watched folder). Hashed from the working tree, so uncommitted edits count.
+function watchedFiles(spec, root, own = []) {
+  const skip = new Set(own.map((p) => path.relative(root, p).split(path.sep).join("/")));
   const prefixes = spec.meta?.watch ?? [];
-  const tracked = lines(git(root, ["ls-files", "--cached", "--others", "--exclude-standard"]));
+  const tracked = listFiles(root, prefixes);
   const files = new Set(tracked.filter((p) => prefixes.some((w) => p.startsWith(w))));
   for (const f of spec.features ?? []) for (const s of f.sources ?? []) if (s.path) files.add(s.path);
-  return [...files].filter((p) => existsSync(path.join(root, p))).sort();
+  return [...files].filter((p) => !skip.has(p) && existsSync(path.join(root, p))).sort();
+}
+
+// Files git would list, or outside a repository, a walk of the watched paths.
+function listFiles(root, prefixes) {
+  const out = git(root, ["ls-files", "--cached", "--others", "--exclude-standard"]);
+  if (out !== null) return lines(out);
+  const found = [];
+  const walk = (rel) => {
+    let st;
+    try { st = statSync(path.join(root, rel)); } catch { return; }
+    if (st.isFile()) found.push(rel.split(path.sep).join("/"));
+    else if (st.isDirectory()) for (const name of readdirSync(path.join(root, rel))) if (!SKIP_DIRS.has(name)) walk(path.join(rel, name));
+  };
+  for (const p of prefixes) walk(p);
+  return found;
 }
 
 function hashFiles(root, files) {
   if (!files.length) return {};
-  const out = lines(git(root, ["hash-object", "--stdin-paths"], files.join("\n") + "\n"));
-  return Object.fromEntries(files.map((f, i) => [f, out[i]]));
+  const out = git(root, ["hash-object", "--stdin-paths"], files.join("\n") + "\n");
+  if (out === null) return Object.fromEntries(files.map((f) => [f, `sha256:${sha256(readFileSync(path.join(root, f)))}`]));
+  const hashes = lines(out);
+  return Object.fromEntries(files.map((f, i) => [f, hashes[i]]));
 }
 
 // ---------------------------------------------------------------- validate
@@ -149,6 +176,7 @@ function validate(spec, root) {
     if (!f.summary) err(fw, "needs a one-sentence summary");
     else if (f.summary.length > 180) warn(fw, `summary is ${f.summary.length} chars; keep it to one short sentence`);
     if (groupIds.size && !groupIds.has(f.group)) err(fw, `group "${f.group}" is not in groups`);
+    if (f.status !== undefined && !STATUSES.has(f.status)) err(fw, `status must be one of ${[...STATUSES].join(", ")}`);
     const fAnchor = `f-${f.id}`;
     for (const q of f.q ?? []) addRef(q, fw, fAnchor, f.name);
 
@@ -160,17 +188,22 @@ function validate(spec, root) {
       if (!existsSync(abs)) { err(sw, `${s.path} does not exist`); continue; }
       if (s.symbol && !readFileSync(abs, "utf8").includes(s.symbol)) err(sw, `"${s.symbol}" is not in ${s.path}`);
       let line = null;
+      let pinned = false;
       if (rev) {
         const atRev = git(root, ["show", `${rev}:${s.path}`]);
-        if (atRev === null) warn(sw, `${s.path} is not in ${rev.slice(0, 7)}; its link 404s until committed and stamped`);
-        else if (s.symbol) {
-          const n = atRev.split("\n").findIndex((l) => l.includes(s.symbol));
-          if (n >= 0) line = n + 1;
+        if (atRev === null) {
+          if (meta.repository?.url) warn(sw, `${s.path} is not in ${rev.slice(0, 7)}; it links to the local file until committed and stamped`);
+        } else {
+          pinned = true;
+          if (s.symbol) {
+            const n = atRev.split("\n").findIndex((l) => l.includes(s.symbol));
+            if (n >= 0) line = n + 1;
+          }
         }
       }
-      sources.push({ ...s, line });
+      sources.push({ ...s, line, pinned });
     }
-    if (!sources.length) warn(fw, "cites no source; stale cannot track it");
+    if (!sources.length && f.status !== "planned") warn(fw, "cites no source; stale cannot track it");
 
     const tables = f.tables ?? [];
     if (!tables.length) err(fw, "needs at least one table");
@@ -279,13 +312,16 @@ function validate(spec, root) {
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const fmt = (s) => esc(s).replace(/`([^`]+)`/g, "<code>$1</code>");
 
-function render(spec, v, lock) {
+function render(spec, v, lock, root, htmlPath) {
   const meta = spec.meta;
   const ACTORS = actorsOf(spec);
   const repo = meta.repository ?? {};
   const rev = repo.revision;
   const base = repo.url?.replace(/\/$/, "");
-  const blob = (p, line) => (base && rev ? `${base}/blob/${rev}/${p}${line ? `#L${line}` : ""}` : null);
+  // On the code host at the pinned commit when it has the file; otherwise the local file, relative to the page.
+  const link = (s) => (base && rev && s.pinned
+    ? `${base}/blob/${rev}/${s.path}${s.line ? `#L${s.line}` : ""}`
+    : encodeURI(path.relative(path.dirname(htmlPath), path.join(root, s.path)).split(path.sep).join("/")));
   const qById = new Map((spec.questions ?? []).map((q) => [q.id, q]));
 
   const sevById = new Map([...(spec.questions ?? []).map((q) => [q.id, q.severity]), ...v.gaps.map((g) => [g.id, g.severity])]);
@@ -382,11 +418,12 @@ function render(spec, v, lock) {
 
   const sources = (fm) => fm.sources.map((s) => {
     const label = esc(s.label ?? (s.symbol ? `${s.path.split("/").pop()} · ${s.symbol}` : s.path));
-    const href = blob(s.path, s.line);
-    return href ? `<a href="${esc(href)}" title="${esc(s.path)}">${label}</a>` : `<span title="${esc(s.path)}">${label}</span>`;
+    return `<a href="${esc(link(s))}" title="${esc(s.path)}">${label}</a>`;
   }).join("");
 
-  const sections = v.model.map((fm) => `<section class="feature" id="${fm.anchor}"><header><h2>${fmt(fm.f.name)}${qMark(fm.f.q ?? [])}</h2><p>${fmt(fm.f.summary)}</p>${fm.sources.length ? `<div class="src">${sources(fm)}</div>` : ""}</header>${fm.tables.map(table).join("")}</section>`).join("");
+  const planTag = (fm) => (fm.f.status === "planned" ? `<span class="plan" title="From a spec; not built yet">planned</span>` : "");
+  const planned = v.model.filter((fm) => fm.f.status === "planned").length;
+  const sections = v.model.map((fm) => `<section class="feature" id="${fm.anchor}"><header><h2>${fmt(fm.f.name)}${planTag(fm)}${qMark(fm.f.q ?? [])}</h2><p>${fmt(fm.f.summary)}</p>${fm.sources.length ? `<div class="src">${sources(fm)}</div>` : ""}</header>${fm.tables.map(table).join("")}</section>`).join("");
 
   // Three boxes per menu row, critical → minor; an empty box stays grey.
   const sevBoxes = (ids) => {
@@ -394,7 +431,7 @@ function render(spec, v, lock) {
     const title = Object.keys(SEVERITY).map((s) => `${n[s]} ${SEVERITY[s].label.toLowerCase()}`).join(" · ");
     return `<span class="sevs" title="${title}">${Object.keys(SEVERITY).map((s) => `<span class="sb s-${s}${n[s] ? "" : " z"}">${n[s]}</span>`).join("")}</span>`;
   };
-  const navItem = (fm) => `<a href="#${fm.anchor}">${fmt(fm.f.name)}${sevBoxes(openCount(fm))}</a>`;
+  const navItem = (fm) => `<a href="#${fm.anchor}">${fmt(fm.f.name)}${planTag(fm)}${sevBoxes(openCount(fm))}</a>`;
   const groups = spec.groups?.length ? spec.groups : [{ id: null, label: null }];
   const nav = groups.map((g) => {
     const items = v.model.filter((fm) => g.id === null || fm.f.group === g.id);
@@ -423,7 +460,7 @@ function render(spec, v, lock) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="decision-tables">
+<meta name="generator" content="rulemap">
 <title>${esc(meta.title)}</title>
 <style>${CSS}</style>
 </head>
@@ -436,7 +473,7 @@ function render(spec, v, lock) {
 <main>
   <header class="top">
     <h1>${esc(meta.title)}</h1>
-    <p class="meta">${v.model.length} features · ${totalQ} open questions ${sevSplit} · code at ${revLink}</p>
+    <p class="meta">${v.model.length} features${planned ? ` (${planned} planned)` : ""} · ${totalQ} open questions ${sevSplit} · code at ${revLink}</p>
     <p class="who-key">Whose condition: ${Object.entries(ACTORS).map(([a, name]) => `<span class="who w-${a}">${name}</span>`).join("")}</p>
   </header>
   ${sections}
@@ -577,6 +614,8 @@ thead th{font-size:12px;font-weight:500;color:var(--mute);background:var(--bg)}
 .who{display:inline-block;font:500 10.5px/1.5 var(--mono);padding:0 5px;margin-right:6px;border:1px solid var(--line-2);border-radius:4px;color:var(--mute);background:var(--panel);vertical-align:1px;white-space:nowrap;text-transform:lowercase}
 .who-key{margin:8px 0 0;font-size:12px;color:var(--mute);display:flex;flex-wrap:wrap;gap:4px;align-items:center}
 .who-key .who{margin:0}
+/* A planned feature: described by a spec, not yet in the code. */
+.plan{display:inline-block;font:500 10.5px/1.5 var(--mono);padding:0 6px;border:1px dashed var(--line-2);border-radius:4px;color:var(--mute);white-space:nowrap}
 
 td:target,li:target{outline:2px solid var(--ring);outline-offset:-2px}
 tr:target>td{box-shadow:inset 0 1px 0 var(--ring),inset 0 -1px 0 var(--ring)}
@@ -621,9 +660,9 @@ function readLock(htmlPath) {
   return m ? JSON.parse(m[1]) : null;
 }
 
-function stale(spec, specSha, root, htmlPath) {
+function stale(spec, specSha, root, htmlPath, specPath) {
   const lock = readLock(htmlPath);
-  const files = watchedFiles(spec, root);
+  const files = watchedFiles(spec, root, [specPath, htmlPath]);
   const now = hashFiles(root, files);
   const before = lock?.files ?? {};
   const changed = new Set([
@@ -651,26 +690,137 @@ function stale(spec, specSha, root, htmlPath) {
 const DECISION = /\bif\s*\(|\belse\b|\bswitch\s*\(|\bcase\b|\bcatch\b|\bthrow\b|\s\?\s[^:]+\s:\s|\?\?|\bstatus:\s*\d{3}|\bMath\.(min|max)\(|[<>]=?\s*[A-Z][A-Z0-9_]{2,}\b|[!=]==?\s*["'][A-Z][A-Z_]+["']/;
 // Where the next top-level declaration starts, ending the cited function.
 const TOP_LEVEL = /^(export\s+)?(async\s+)?function\b|^export\s+(default\s+)?(const|let|class|async|function)\b|^(const|let|class)\s/;
+// A spec or other prose document, audited sentence by sentence rather than by syntax.
+const PROSE = /\.(md|mdx|markdown|txt|rst|adoc)$/i;
+const HEADING = /^(#{1,6})\s/;
+// A line of a spec that decides something: a condition, a limit, a number, or a row of a table.
+const DECISION_PROSE = /\b(if|unless|when|whenever|only|except|otherwise|else|must|cannot|can't|never|always|before|after|until|within|at (least|most)|more than|less than|fewer than|up to|over|under|above|below|exceeds?|expires?|allowed|refused?|rejected?|requires?|eligible|either|neither|depends)\b|\d+\s*(%|mins?|minutes?|hours?|days?|weeks?|months?|years?)\b|[<>≤≥]=?\s*\d|[$€£¥]\s?\d|^\s*\|(?!\s*:?-{3})/i;
 
 // Decision points in a cited source: within the cited symbol's declaration
-// when there is one, otherwise the whole file (route handlers are short).
+// (or, in a document, the cited heading's section) when there is one,
+// otherwise the whole file (route handlers are short).
 function decisionPoints(root, s) {
   const abs = path.join(root, s.path);
   if (!existsSync(abs)) return { path: s.path, symbol: s.symbol ?? null, missing: true, points: [] };
   const src = readFileSync(abs, "utf8").split(/\r?\n/);
+  const prose = PROSE.test(s.path);
   let from = 0;
   let to = src.length;
   if (s.symbol) {
     const start = src.findIndex((l) => l.includes(s.symbol));
     if (start >= 0) {
       from = start;
-      const next = src.findIndex((l, i) => i > start && TOP_LEVEL.test(l));
+      // A section runs to the next heading at its level or above; a symbol that is not a heading, to the next heading.
+      const level = src[start].match(HEADING)?.[1].length ?? 7;
+      const next = prose
+        ? src.findIndex((l, i) => i > start && (l.match(HEADING)?.[1].length ?? 99) <= level)
+        : src.findIndex((l, i) => i > start && TOP_LEVEL.test(l));
       to = next < 0 ? src.length : next;
     }
   }
+  const test = prose ? DECISION_PROSE : DECISION;
   const points = [];
-  for (let i = from; i < to; i++) if (DECISION.test(src[i])) points.push({ line: i + 1, code: src[i].trim().slice(0, 160) });
+  for (let i = from; i < to; i++) if (test.test(src[i])) points.push({ line: i + 1, code: src[i].trim().slice(0, 160) });
   return { path: s.path, symbol: s.symbol ?? null, from: from + 1, to, points };
+}
+
+// ---------------------------------------------------------------- setup
+
+// Per-project choices, written by `setup`. The hook and its copy of this tool
+// live beside them when the project opts into the hook.
+const CONFIG_DIR = ".claude/rulemap";
+const CONFIG = `${CONFIG_DIR}/config.json`;
+const SPEC_NAME = "rulemap.json";
+// area: one page per feature area, <dir>/<area>/rulemap.json. single: one page, <dir>/rulemap.json.
+const LAYOUTS = new Set(["area", "single"]);
+const HOOK_TARGETS = { none: null, project: ".claude/settings.json", local: ".claude/settings.local.json" };
+const HOOK_MARK = `${CONFIG_DIR}/sync-hook.mjs`;
+const HOOK_COMMAND = `node "$CLAUDE_PROJECT_DIR/${HOOK_MARK}"`;
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+function readConfig(root) {
+  try {
+    return JSON.parse(readFileSync(path.join(root, CONFIG), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+const describeLayout = (cfg) => (cfg.layout === "single" ? `one page at ${cfg.dir}/${SPEC_NAME}` : `one page per feature area at ${cfg.dir}/<area>/${SPEC_NAME}`);
+
+function findSpecs(root, cfg) {
+  const dir = path.join(root, cfg.dir);
+  if (cfg.layout === "single") return existsSync(path.join(dir, SPEC_NAME)) ? [`${cfg.dir}/${SPEC_NAME}`] : [];
+  let areas = [];
+  try {
+    areas = readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch {
+    return [];
+  }
+  return areas.filter((a) => existsSync(path.join(dir, a, SPEC_NAME))).sort().map((a) => `${cfg.dir}/${a}/${SPEC_NAME}`);
+}
+
+// Adds or removes this tool's Stop hook in one settings file, leaving every other setting alone.
+function editHook(file, want) {
+  let settings = {};
+  if (existsSync(file)) {
+    try {
+      settings = JSON.parse(readFileSync(file, "utf8"));
+    } catch {
+      if (!want) return null;
+      throw new Error(`${file} is not plain JSON; add a Stop hook running ${HOOK_COMMAND} by hand`);
+    }
+  } else if (!want) return null;
+  const isOurs = (h) => typeof h.command === "string" && h.command.includes(HOOK_MARK);
+  const stop = settings.hooks?.Stop ?? [];
+  const has = stop.some((g) => (g.hooks ?? []).some(isOurs));
+  if (want === has) return null;
+  const next = want
+    ? [...stop, { hooks: [{ type: "command", command: HOOK_COMMAND, timeout: 60, statusMessage: "Checking rulemap pages are in sync with the code" }] }]
+    : stop.map((g) => ({ ...g, hooks: (g.hooks ?? []).filter((h) => !isOurs(h)) })).filter((g) => g.hooks.length);
+  settings.hooks = { ...settings.hooks, Stop: next };
+  if (!next.length) delete settings.hooks.Stop;
+  if (!Object.keys(settings.hooks).length) delete settings.hooks;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+  return want ? "added" : "removed";
+}
+
+function setup(root, opt) {
+  const dir = (opt.dir ?? "").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "").replace(/\/<[^>]*>$|\/\*$/, "");
+  if (!dir || path.isAbsolute(dir) || /^[a-z]:/i.test(dir) || dir.split("/").includes("..")) throw new Error("--dir must be a folder inside the project, e.g. docs/features");
+  const layout = opt.layout ?? "area";
+  if (!LAYOUTS.has(layout)) throw new Error(`--layout must be one of ${[...LAYOUTS].join(", ")}`);
+  const hook = opt.hook ?? "none";
+  if (!(hook in HOOK_TARGETS)) throw new Error(`--hook must be one of ${Object.keys(HOOK_TARGETS).join(", ")}`);
+  const hookSrc = path.join(here, "..", "hooks", "sync-hook.mjs");
+  if (hook !== "none" && !existsSync(hookSrc)) throw new Error(`run setup from the skill's own copy of this tool; ${hookSrc} is missing`);
+
+  const cfgDir = path.join(root, CONFIG_DIR);
+  mkdirSync(cfgDir, { recursive: true });
+  const cfg = { dir, layout };
+  writeFileSync(path.join(root, CONFIG), JSON.stringify(cfg, null, 2) + "\n");
+  const done = [`${CONFIG}: ${describeLayout(cfg)}`];
+
+  for (const [kind, rel] of Object.entries(HOOK_TARGETS)) {
+    if (!rel) continue;
+    const r = editHook(path.join(root, rel), kind === hook);
+    if (r) done.push(`${rel}: ${r} the Stop hook`);
+  }
+  // The hook must run for teammates without the plugin, so it gets its own copy of this tool.
+  const copies = ["sync-hook.mjs", "rulemap.mjs"];
+  if (hook === "none") {
+    for (const f of [...copies, ".gitignore"]) rmSync(path.join(cfgDir, f), { force: true });
+    done.push("no hook: pages update when asked");
+  } else {
+    copyFileSync(hookSrc, path.join(cfgDir, "sync-hook.mjs"));
+    copyFileSync(fileURLToPath(import.meta.url), path.join(cfgDir, "rulemap.mjs"));
+    // Just for me: keep the copies out of the repository as well.
+    if (hook === "local") writeFileSync(path.join(cfgDir, ".gitignore"), copies.join("\n") + "\n");
+    else rmSync(path.join(cfgDir, ".gitignore"), { force: true });
+    done.push(`${CONFIG_DIR}/: copied the hook and this tool${hook === "local" ? " (gitignored)" : "; commit them with .claude/settings.json"}`);
+  }
+  return done;
 }
 
 // ---------------------------------------------------------------- commands
@@ -711,15 +861,36 @@ function main() {
       stamp: { type: "boolean" },
       feature: { type: "string", multiple: true },
       changed: { type: "boolean" },
+      dir: { type: "string" },
+      layout: { type: "string" },
+      hook: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
   const [cmd, specArg, outArg] = positionals;
+
+  if (cmd === "setup" || cmd === "specs") {
+    const root = opt["repo-root"] ? path.resolve(opt["repo-root"]) : git(process.cwd(), ["rev-parse", "--show-toplevel"])?.trim() || process.cwd();
+    if (cmd === "setup") {
+      const done = setup(root, opt);
+      report(opt.json, { done }, done.join("\n"));
+      return 0;
+    }
+    const cfg = readConfig(root);
+    if (!cfg) {
+      report(opt.json, { configured: false, specs: [] }, `not set up: ${CONFIG} is missing`);
+      return 3;
+    }
+    const specs = findSpecs(root, cfg);
+    report(opt.json, { configured: true, ...cfg, specs }, [describeLayout(cfg), ...(specs.length ? specs.map((s) => `  ${s}`) : ["  (no pages yet)"])].join("\n"));
+    return 0;
+  }
+
   if (opt.help || !cmd || !specArg) { console.log(USAGE); return cmd ? 0 : 1; }
 
   const specPath = path.resolve(specArg);
-  const root = opt["repo-root"] ? path.resolve(opt["repo-root"]) : git(path.dirname(specPath), ["rev-parse", "--show-toplevel"])?.trim();
-  if (!root) { console.error("not inside a git repository; pass --repo-root"); return 1; }
+  // Outside a repository, sources are relative to where the tool runs; links go to local files and nothing is pinned.
+  const root = opt["repo-root"] ? path.resolve(opt["repo-root"]) : git(path.dirname(specPath), ["rev-parse", "--show-toplevel"])?.trim() || process.cwd();
 
   if (cmd === "stamp") {
     const head = stamp(specPath, readFileSync(specPath, "utf8"), root);
@@ -727,7 +898,10 @@ function main() {
     return 0;
   }
 
-  if (cmd === "deliver" && opt.stamp) stamp(specPath, readFileSync(specPath, "utf8"), root);
+  if (cmd === "deliver" && opt.stamp) {
+    if (git(root, ["rev-parse", "HEAD"]) === null) console.error("not a git repository with commits: revision left unpinned");
+    else stamp(specPath, readFileSync(specPath, "utf8"), root);
+  }
   const { spec, sha } = load(specPath);
   const htmlPath = path.resolve(outPath(specPath, spec, outArg));
 
@@ -739,9 +913,9 @@ function main() {
       report(opt.json, summary, `${ok ? "valid" : "INVALID"}: ${v.errors.length} errors, ${v.warnings.length} warnings, ${summary.features} features, ${summary.questions} questions, ${summary.unhandled} unhandled combinations\n${printDiagnostics(v)}`.trimEnd());
       return ok ? 0 : 1;
     }
-    const files = watchedFiles(spec, root);
-    const lock = { spec: sha, files: hashFiles(root, files) };
-    const html = render(spec, v, lock);
+    const files = watchedFiles(spec, root, [specPath, htmlPath]);
+    const lock ={ spec: sha, files: hashFiles(root, files) };
+    const html = render(spec, v, lock, root, htmlPath);
     const tmp = `${htmlPath}.tmp-${process.pid}`;
     writeFileSync(tmp, html);
     renameSync(tmp, htmlPath);
@@ -759,7 +933,7 @@ function main() {
     }
     let extra = [];
     if (opt.changed) {
-      const s = stale(spec, sha, root, htmlPath);
+      const s = stale(spec, sha, root, htmlPath, specPath);
       const ids = new Set(s.features.map((f) => f.id));
       feats = feats.filter((f) => ids.has(f.id));
       extra = s.uncited.filter((u) => u.status !== "deleted").map((u) => decisionPoints(root, { path: u.path }));
@@ -782,7 +956,7 @@ function main() {
   }
 
   if (cmd === "stale") {
-    const s = stale(spec, sha, root, htmlPath);
+    const s = stale(spec, sha, root, htmlPath, specPath);
     const human = [];
     if (!s.stale) human.push("up to date");
     if (s.html === "missing") human.push("HTML: missing or has no lock; run deliver");

@@ -4,8 +4,8 @@
 {
   "schema_version": 1,
   "meta": {
-    "title": "Shop feature decisions",
-    "output": "feature-decisions.html",            // written beside the spec
+    "title": "Refunds",
+    "output": "rulemap.html",                      // written beside the spec
     "repository": { "url": "https://github.com/acme/shop", "revision": "<40-char sha>" },
     "watch": ["src/lib/", "src/app/api/"],
     "actors": { "customer": "Customer", "seller": "Seller", "admin": "Admin", "system": "System" }
@@ -58,21 +58,44 @@
 }
 ```
 
+## Planned features
+
+A feature planned from a spec looks the same, with `"status": "planned"` and
+the spec's section as a source:
+
+```jsonc
+{
+  "id": "gift-card-refunds",
+  "group": "orders",
+  "name": "Gift card refunds",
+  "status": "planned",                               // from a spec, not built yet
+  "summary": "How a refund is split when an order was paid partly by gift card.",
+  "sources": [
+    { "path": "docs/features/gift-cards/spec.md", "symbol": "## Refunds" },   // the section that states the rule
+    { "path": "src/lib/refunds.ts", "symbol": "canRequestRefund" }            // existing code it builds on
+  ],
+  "tables": [ /* as above; combinations the spec leaves open stay uncovered */ ]
+}
+```
+
 ## Rules of the format
 
 - **Actors.** `meta.actors` names the people who use the app, as
   `id -> label`, plus `system` for what no person controls (the payment
   gateway, cron, env flags). Without it the tool falls back to `user`,
-  `admin`, `system` and warns. Every input names whose condition it is, so a
-  reader can tell "Scheduled, numeric time" is the customer's booking and not
-  a driver's: `"actor"` is one of the ids in `meta.actors`, or a list when the
-  condition applies to several roles (`["seller", "admin"]` for anyone who
-  can edit a listing). When one axis mixes people, set the input to the main
-  one and give the other values their own `"actor"`. When two people in the
-  same role matter, name the second with `"as"`:
+  `admin`, `system` and warns. Every input names whose condition it is:
+  `"actor"` is one of the ids in `meta.actors`, or a list when the condition
+  applies to several roles (`["seller", "admin"]` for anyone who can edit a
+  listing). When one axis mixes people, set the input to the main one and give
+  the other values their own `"actor"`. When two people in the same role
+  matter, name the second with `"as"`:
   `{ "id": "taken", "label": "Holds the order", "actor": "seller", "as": "Other seller" }`.
   Validate fails an input with no actor. The badge renders on the axis
   header, and on each value whose actor differs.
+- **Status.** `"built"` (the default) for behaviour mapped from code that
+  exists; `"planned"` for behaviour described by a spec and not yet built. A
+  planned feature is tagged in its heading and in the menu, and may cite no
+  source when the plan exists only in conversation.
 - **Granular conditions.** Every input value is one condition. Never merge
   states into one value ("ASSIGNED or EN_ROUTE", "accepts / assigns",
   "stale or missing"): give each its own value, even when they share an
@@ -88,8 +111,8 @@
   apply are warned about.
 - **Coverage.** Every combination no rule matches becomes an unhandled
   combination: a dashed `?` cell linked to an auto-numbered `U1, U2…` entry at
-  the bottom. This is the intended way to show a real gap. Do not add a
-  question that duplicates it.
+  the bottom. This is the intended way to show a real gap, and in a plan, a
+  decision still to make. Do not add a question that duplicates it.
 - **Questions.** `q` on a rule highlights that rule's row and each of its grid
   cells with a link to the question; the question links back. `q` on a feature
   marks its heading. Ids are `Q<n>`; `kind` is `gap | clarify | conflict | bug`.
@@ -113,7 +136,12 @@
   sentence, notes to a few words, labels to a few words.
 - **`"view": "rules"`** on a two-input table forces the rules layout.
 - **Size.** Warns above 64 combinations; split the table instead.
-- **Sources:** `path` must exist in the working tree; `symbol`, if given, must
-  appear in it. Links resolve to the line of the symbol at the pinned revision
-  (GitHub-style `/blob/<sha>/<path>#L<n>` URLs). `label` overrides the link
-  text.
+- **Sources** are code or documents. `path` must exist in the working tree;
+  `symbol`, if given, must appear in it — a function or constant name in
+  code, the heading line of a section in a document (`"## Refunds"`). For a
+  document, `branches` lists the decision-bearing lines of that section
+  (conditions, limits, numbers, table rows) up to the next heading at the
+  same level. Links open on the code host at the pinned revision
+  (GitHub-style `/blob/<sha>/<path>#L<n>`) when `meta.repository.url` is set
+  and the file is committed there; otherwise they point at the local file,
+  relative to the page. `label` overrides the link text.
