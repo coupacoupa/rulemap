@@ -1,0 +1,13 @@
+{
+  "name": "decision-tables",
+  "owner": { "name": "SF", "email": "coupacoupa@live.com" },
+  "description": "Decision-table documentation and business-rule auditing for Claude Code.",
+  "plugins": [
+    {
+      "name": "decision-tables",
+      "source": "./",
+      "description": "Map an app's business rules as decision tables, audit every branch for gaps, and keep the page in sync with the code.",
+      "version": "1.0.0"
+    }
+  ]
+}

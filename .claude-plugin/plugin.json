@@ -1,0 +1,8 @@
+{
+  "name": "decision-tables",
+  "description": "Map an app's business rules as decision tables in one standalone HTML page, audit every branch in the cited code for gaps and bugs, and keep the page in sync as the code changes.",
+  "version": "1.0.0",
+  "author": { "name": "SF", "email": "coupacoupa@live.com" },
+  "license": "MIT",
+  "keywords": ["documentation", "business-rules", "decision-tables", "audit"]
+}
