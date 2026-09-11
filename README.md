@@ -36,7 +36,7 @@ ships, the planned tables are checked against the real code.
 In Claude Code:
 
 ```
-/plugin marketplace add <github-user>/rulemap
+/plugin marketplace add coupacoupa/rulemap
 /plugin install rulemap@rulemap
 ```
 
