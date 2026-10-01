@@ -33,6 +33,16 @@ Answers become rules and are kept on the page as the record of what was
 decided; your spec is only read, never edited. When the feature ships, the
 planned tables are checked against the real code.
 
+**A project checklist** makes both modes stricter. List in
+`.claude/rulemap/checklist.json` what every feature in your app has to be
+checked against — account states, roles, kinds of login, and the existing
+changes that reach into new features, such as an admin deleting a user or a
+refund from the support tool. Each planned feature must cover every item in a
+table or say why it cannot matter; anything left shows as "Not yet checked"
+on the page. Plan mode also sweeps for the paths in existing code that change
+what a feature reads, the lifecycle of each record, and every screen a
+condition must be honoured on.
+
 ## Install
 
 In Claude Code:

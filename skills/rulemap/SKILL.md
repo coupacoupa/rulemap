@@ -60,15 +60,17 @@ map the code and plan what the spec adds on top, and say which is which.
 
 ## Writing the tables (both modes)
 
-1. **Choose the axes from the source, not from intuition.** An input is a
-   condition the code branches on, or the spec names; its values are the
-   branches that exist, in product language with the real threshold
+1. **Ground every axis in a source.** An input is a condition the code
+   branches on, the spec names, the project checklist lists, or an existing
+   path changes (Plan step 3 says how to find those); its values are the
+   states that exist, in product language with the real threshold
    (`fix < 5 min`, `before 03:55`). **Keep conditions granular:** every value
    is exactly one state. Never merge states into one value ("ASSIGNED or
    EN_ROUTE", "stale or missing", "accepts / assigns") even when they share an
    outcome; splitting is how hidden differences surface. Two inputs render as
    a grid, the most readable form: prefer two 2-input tables over one 16-row
-   table. Use three or more inputs only when they genuinely interact.
+   table, but never at the cost of an interaction — when conditions in
+   different tables affect each other, they share a table.
 2. **Say whose condition each input is.** Name the app's users in
    `meta.actors` (customer, seller, admin…), plus `system` for what no person
    controls (payment gateway, cron, env flags). Every input carries an
@@ -116,18 +118,48 @@ map the code and plan what the spec adds on top, and say which is which.
 ## Plan: from a spec
 
 1. **Read the whole spec**, every file in the folder and the docs it links.
-   Then read the existing code the feature will touch: statuses, roles,
-   limits and flags it reuses. Conditions that already exist come from the
-   code with their real values, cited to it.
+   Then read the existing code the feature will touch — statuses, roles,
+   limits and flags it reuses — and the code that changes what it reads
+   (step 3). Conditions that already exist come from the code with their real
+   values, cited to it.
 2. **One feature per behaviour the spec describes**, with
    `"status": "planned"`. Sources: the spec file, `symbol` set to the heading
    of the section that states the rule, plus the existing code it builds on.
    A plan that exists only in the conversation has nothing to cite: offer to
    save it as `spec.md` in the area folder so later edits are tracked.
-3. **Axes: what the spec names, and what it forgets.** States the existing
-   code already has (a refunded order, a suspended account, an expired card),
-   every actor who could trigger the rule, time edges (midnight, time zones,
-   expiry), repeats and races. The silent axes are where plans fail.
+3. **Axes: what the spec names, and what it forgets.** The silent axes are
+   where plans fail, and most of them live in the app that already exists, not
+   in the new feature. Work through every sweep below for every feature; a
+   sweep that adds nothing is fine, a sweep skipped is not.
+   - **The checklist.** Each item in the project's checklist (below) becomes an
+     input or a value tagged `"covers": "<item>"`, or goes in the feature's
+     `skips` with the reason it cannot change the outcome. `validate` lists
+     every item a planned feature has done neither with, as `C` entries.
+   - **Who else changes this.** List every table, record or state the feature
+     reads. For each, search the code for every existing path that writes it:
+     user actions, staff and admin tools, scheduled jobs, imports, webhooks,
+     other features, deletes and restores. Search for the writes; do not rely
+     on memory or the spec. Each path is an event the feature must answer.
+   - **Lifecycles.** Every record the feature creates or relies on whose state
+     changes (a request, an invitation, an order) gets a table of its states ×
+     every event that can reach it, including the paths found above. Each
+     cell is the next state, or "nothing happens".
+   - **Every surface.** Each condition that hides, blocks or changes
+     eligibility gets a table of its values × every screen, endpoint,
+     notification, email and job where the feature appears. A condition
+     honoured on one surface and forgotten on another is the commonest gap.
+   - **Both sides.** When a rule involves two people (sender and receiver,
+     buyer and seller), each one's state is its own input, and a change to
+     either one is an event.
+   - **Who can reach it.** Every role and kind of login that reaches the
+     rule: secondary or delegated accounts, staff acting for a user, a user
+     who belongs to two groups at once.
+   - **Time and repeats.** Midnight and time zones, expiry, the boundary
+     itself (`<` vs `<=`), doing it twice, two people doing it at once, doing
+     it after the thing it depends on has ended.
+   - **Across tables.** When two tables share an input, ask whether their
+     other inputs affect each other. If they do, the combination gets its own
+     table or a question.
 4. **Encode only what the spec decides.** Leave every combination it does not
    decide uncovered, however obvious the answer seems: the dashed `?` cells
    are the plan's main output, the decisions still to make, and they are the
@@ -160,8 +192,8 @@ decided what it leaves open, or chosen to leave the rest for later.
    earlier answered question on any page, behaviour the code already ships
    on purpose. Cite it as a source and write the rule. Only what nothing
    decides goes to the user; a long list of questions wears them out.
-2. **Ask every remaining decision** — each `?` cell and each question — worst
-   first, in batches with the AskUserQuestion tool (up to four per call; where
+2. **Ask every remaining decision** — each `?` cell, each `C` checklist entry
+   and each question — worst first, in batches with the AskUserQuestion tool (up to four per call; where
    it is unavailable, a numbered list in chat). Name the exact case, offer the
    concrete outcomes as options with your recommendation first and marked
    "(Recommended)", and let one question settle every cell it covers. Stop when
@@ -169,7 +201,8 @@ decided what it leaves open, or chosen to leave the rest for later.
 3. **Keep each answer on the page.** Write the rule, set the question's
    `answer` to what was decided, and keep its `q` on the rules it produced.
    For a `?` cell, add a question naming the combination first, so the decision
-   has a record. An answered question stays, listed apart from the open ones,
+   has a record. A checklist entry is settled by a table that `covers` it, or
+   by a `skips` entry carrying the user's reason. An answered question stays, listed apart from the open ones,
    so reading the spec again later does not raise it a second time.
 4. `deliver` again.
 
@@ -228,12 +261,42 @@ code changed — the whole feature, not only the diff.
    auth and role checks, state guards, and whether another entry point skips
    them. A guard present in one caller and absent in another is a `bug` or
    `gap`.
-5. **Probe the edges.** `<` vs `<=`, null / undefined / NaN / empty, time
+5. **Find the other writers.** Every path that writes a field or record the
+   rule reads — admin tools, jobs, imports, deletes and restores, other
+   features. A writer the rule never anticipated is a `gap`. Then check the
+   feature against the project checklist: `validate --checklist` lists every
+   item a built feature neither covers nor skips.
+6. **Probe the edges.** `<` vs `<=`, null / undefined / NaN / empty, time
    zones and midnight, duplicates and retries, races, money rounding.
-6. **Cross-check tests and docs.** A test asserting something else, or a doc
+7. **Cross-check tests and docs.** A test asserting something else, or a doc
    or UI string promising what the code does not do, is a `conflict`.
-7. **Treat validator output as findings.** Every uncovered combination is a
-   real gap or a missed rule; every "never applies" rule is a table error.
+8. **Treat validator output as findings.** Every uncovered combination and
+   every `C` checklist entry is a real gap or a missed rule; every "never
+   applies" rule is a table error.
+
+## The project checklist
+
+Optional, and the strongest guard against late surprises. `.claude/rulemap/checklist.json`
+lists what every feature in this project has to be checked against: the
+conditions that always matter here (account states, roles, kinds of login,
+regions, consent or privacy switches) and the existing changes that reach
+into new features (an admin deleting a user, a refund issued from the support
+tool, a nightly job). Each item has an `id`, a `label` and an `ask` — the
+question to put to each feature. The format is in
+[references/spec.md](references/spec.md).
+
+A planned feature settles each item by covering it (an input or value with
+`"covers": "<id>"`) or ruling it out (`"skips": { "<id>": "why it cannot
+matter" }`). An item that cannot matter anywhere on the page is ruled out
+once, in `meta.skips`. Anything left becomes a `C` entry under "Not yet
+checked" on the page. `validate --checklist` applies the same check to built
+features.
+
+When a project has no checklist and the user plans or audits a feature, offer
+to draft one: read the code for its roles, statuses and flags, and for every
+path that writes its main tables, and propose the list for the user to edit.
+When a late gap turns up that the checklist would have caught, offer to add
+it, so the next feature is checked for it from the start.
 
 ## The sync hook
 

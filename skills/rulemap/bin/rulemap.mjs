@@ -24,6 +24,7 @@ const USAGE = `rulemap <command> <spec.json> [out.html] [options]
 
   --repo-root <dir>   repository root (default: git toplevel of the spec, else the current directory)
   --stamp             deliver: pin the revision to HEAD first
+  --checklist         validate, deliver: check every feature against the project checklist, not only planned ones
   --json              machine-readable output`;
 
 const TONES = new Set(["pos", "neg", "warn", "info", "neutral"]);
@@ -117,7 +118,19 @@ function hashFiles(root, files) {
 
 // ---------------------------------------------------------------- validate
 
-function validate(spec, root) {
+// The project's checklist: conditions and existing changes every planned feature must decide or
+// rule out. Optional; written by hand or drafted at setup.
+function readChecklist(root) {
+  const file = path.join(root, CHECKLIST);
+  if (!existsSync(file)) return null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch (e) {
+    return { invalid: e.message };
+  }
+}
+
+function validate(spec, root, opts = {}) {
   const errors = [];
   const warnings = [];
   const err = (where, msg) => errors.push(`${where}: ${msg}`);
@@ -156,6 +169,25 @@ function validate(spec, root) {
     if (!q.text) err(`questions[${q.id}]`, "needs text");
     if (!(q.severity in SEVERITY)) err(`questions[${q.id}]`, `severity must be one of ${Object.keys(SEVERITY).join(", ")}`);
     if (q.answer !== undefined && (typeof q.answer !== "string" || !q.answer.trim())) err(`questions[${q.id}]`, "answer must be text; leave it out while the question is open");
+  }
+
+  const checklist = readChecklist(root);
+  let items = [];
+  if (checklist?.invalid) err(CHECKLIST, `is not valid JSON: ${checklist.invalid}`);
+  else if (checklist) {
+    items = Array.isArray(checklist.items) ? checklist.items : [];
+    if (!Array.isArray(checklist.items)) err(CHECKLIST, `needs "items": a list of { id, label, ask? }`);
+    unique(items, CHECKLIST);
+    for (const it of items) if (!it.label) err(CHECKLIST, `item "${it.id}" needs a label`);
+  }
+  const itemById = new Map(items.map((it) => [it.id, it]));
+  const checks = [];
+  // Items ruled out for the whole page (an area that only exists in one region, say).
+  const pageSkips = meta.skips ?? {};
+  if (typeof pageSkips !== "object" || Array.isArray(pageSkips)) err("meta.skips", "must be an object of checklist id -> reason");
+  else for (const [id, why] of Object.entries(pageSkips)) {
+    if (!itemById.has(id)) err("meta.skips", checklist ? `skips "${id}", which is not in ${CHECKLIST}` : `skips "${id}", but the project has no ${CHECKLIST}`);
+    else if (typeof why !== "string" || !why.trim()) err("meta.skips", `skips "${id}" without saying why it cannot matter`);
   }
 
   const features = spec.features ?? [];
@@ -207,6 +239,14 @@ function validate(spec, root) {
     if (!tables.length) err(fw, "needs at least one table");
     unique(tables, `${fw}.tables`);
     const tModels = [];
+    // Checklist items this feature decides: named by `covers` on an input or a value.
+    const covered = new Set();
+    const cover = (x, where) => {
+      for (const id of [x.covers ?? []].flat()) {
+        if (itemById.has(id)) covered.add(id);
+        else err(where, checklist ? `covers "${id}", which is not in ${CHECKLIST}` : `covers "${id}", but the project has no ${CHECKLIST}`);
+      }
+    };
     for (const t of tables) {
       const tw = `${fw}.tables[${t.id}]`;
       const anchor = `${fAnchor}-${t.id}`;
@@ -232,7 +272,11 @@ function validate(spec, root) {
       };
       for (const x of inputs) {
         checkActor(x, `${tw}.inputs[${x.id}]`, true);
-        for (const v of x.values ?? []) checkActor(v, `${tw}.inputs[${x.id}].values[${v.id}]`, false);
+        cover(x, `${tw}.inputs[${x.id}]`);
+        for (const v of x.values ?? []) {
+          checkActor(v, `${tw}.inputs[${x.id}].values[${v.id}]`, false);
+          cover(v, `${tw}.inputs[${x.id}].values[${v.id}]`);
+        }
       }
       for (const x of [...inputs, ...outputs]) {
         for (const v of x.values ?? []) if (JOINED.test(v.label ?? "")) warn(tw, `"${v.label}" joins several conditions; give each its own value`);
@@ -299,10 +343,30 @@ function validate(spec, root) {
 
       tModels.push({ t, anchor, inputs, outputs, rules, cells, grid });
     }
-    model.push({ f, anchor: fAnchor, sources, tables: tModels });
+    // Checklist items ruled out, each with the reason it cannot change this feature's outcome.
+    const skips = f.skips ?? {};
+    if (typeof skips !== "object" || Array.isArray(skips)) err(fw, `skips must be an object of checklist id -> reason`);
+    else for (const [id, why] of Object.entries(skips)) {
+      if (!itemById.has(id)) err(fw, checklist ? `skips "${id}", which is not in ${CHECKLIST}` : `skips "${id}", but the project has no ${CHECKLIST}`);
+      else if (typeof why !== "string" || !why.trim()) err(fw, `skips "${id}" without saying why it cannot matter`);
+      else if (covered.has(id)) warn(fw, `both covers and skips "${id}"`);
+    }
+    // Every item a planned feature (or, with --checklist, any feature) neither decides nor rules out.
+    const fChecks = [];
+    if (f.status === "planned" || opts.checklistAll) {
+      const missing = items.filter((it) => !covered.has(it.id) && !(skips && it.id in skips) && !(it.id in pageSkips));
+      for (const it of missing) {
+        const id = `C${checks.length + 1}`;
+        checks.push({ id, severity: GAP_SEVERITY, text: `${f.name} never decides ${it.label}.${it.ask ? ` ${it.ask}` : ""}`, refs: [{ anchor: fAnchor, label: f.name }] });
+        fChecks.push(id);
+      }
+      if (missing.length) warn(fw, `never decides ${missing.length} checklist item${missing.length === 1 ? "" : "s"} (${missing.map((it) => it.id).join(", ")}): cover each with an input or value, or skip it with the reason it cannot matter`);
+    }
+
+    model.push({ f, anchor: fAnchor, sources, tables: tModels, checks: fChecks, covered, skips: typeof skips === "object" ? skips : {} });
   }
 
-  return { errors, warnings, model, refs, gaps };
+  return { errors, warnings, model, refs, gaps, checks, items: itemById };
 }
 
 // ---------------------------------------------------------------- render
@@ -326,7 +390,9 @@ function render(spec, v, lock, root, htmlPath) {
   const isOpen = (id) => !qById.get(id)?.answer;
   const openQuestions = (spec.questions ?? []).filter((q) => !q.answer);
 
-  const sevById = new Map([...openQuestions.map((q) => [q.id, q.severity]), ...v.gaps.map((g) => [g.id, g.severity])]);
+  // Generated entries: uncovered combinations (U) and checklist items a feature never decides (C).
+  const auto = [...v.gaps, ...v.checks];
+  const sevById = new Map([...openQuestions.map((q) => [q.id, q.severity]), ...auto.map((g) => [g.id, g.severity])]);
   const worst = (ids) => ids.map((id) => sevById.get(id)).filter((s) => s in SEVERITY).sort((a, b) => SEVERITY[a].rank - SEVERITY[b].rank)[0] ?? "minor";
   const sevChip = (s) => `<span class="sev s-${esc(s)}">${esc(SEVERITY[s]?.label ?? s)}</span>`;
   const bySeverity = (a, b) => (SEVERITY[a.severity]?.rank ?? 9) - (SEVERITY[b.severity]?.rank ?? 9) || a.id.localeCompare(b.id, undefined, { numeric: true });
@@ -336,7 +402,7 @@ function render(spec, v, lock, root, htmlPath) {
     const q = qById.get(id);
     if (q?.answer) return `<a class="qm ans" href="#${esc(id)}" title="${esc(`Answered: ${q.answer}`)}">${esc(id)}</a>`;
     const s = sevById.get(id);
-    const text = q?.text ?? v.gaps.find((g) => g.id === id)?.text ?? "";
+    const text = q?.text ?? auto.find((g) => g.id === id)?.text ?? "";
     return `<a class="qm s-${esc(s)}" href="#${esc(id)}" title="${esc(`${SEVERITY[s]?.label ?? ""}: ${text}`)}">${esc(id)}</a>`;
   }).join("");
   // The outline a cell or row gets for its questions: only open ones count.
@@ -361,7 +427,7 @@ function render(spec, v, lock, root, htmlPath) {
   };
 
   const openCount = (fm) => {
-    const ids = new Set(fm.f.q ?? []);
+    const ids = new Set([...(fm.f.q ?? []), ...fm.checks]);
     for (const tm of fm.tables) {
       for (const r of tm.rules) for (const q of r.q ?? []) ids.add(q);
       for (const c of tm.cells) if (c.gap) ids.add(c.gap);
@@ -434,7 +500,11 @@ function render(spec, v, lock, root, htmlPath) {
 
   const planTag = (fm) => (fm.f.status === "planned" ? `<span class="plan" title="From a spec; not built yet">planned</span>` : "");
   const planned = v.model.filter((fm) => fm.f.status === "planned").length;
-  const sections = v.model.map((fm) => `<section class="feature" id="${fm.anchor}"><header><h2>${fmt(fm.f.name)}${planTag(fm)}${qMark(fm.f.q ?? [])}</h2><p>${fmt(fm.f.summary)}</p>${fm.sources.length ? `<div class="src">${sources(fm)}</div>` : ""}</header>${fm.tables.map(table).join("")}</section>`).join("");
+  const skipped = (fm) => {
+    const list = Object.entries(fm.skips).filter(([id]) => v.items.has(id));
+    return list.length ? `<p class="skips">Ruled out: ${list.map(([id, why]) => `<span><b>${fmt(v.items.get(id).label)}</b> ${fmt(why)}</span>`).join("")}</p>` : "";
+  };
+  const sections = v.model.map((fm) => `<section class="feature" id="${fm.anchor}"><header><h2>${fmt(fm.f.name)}${planTag(fm)}${qMark([...(fm.f.q ?? []), ...fm.checks])}</h2><p>${fmt(fm.f.summary)}</p>${fm.sources.length ? `<div class="src">${sources(fm)}</div>` : ""}${skipped(fm)}</header>${fm.tables.map(table).join("")}</section>`).join("");
 
   // Three boxes per menu row, critical → minor; an empty box stays grey.
   const sevBoxes = (ids) => {
@@ -457,8 +527,9 @@ function render(spec, v, lock, root, htmlPath) {
   const gapItems = v.gaps.map((g) => `<li id="${g.id}" class="s-${g.severity}"><div class="q-h"><span class="qid">${g.id}</span>${sevChip(g.severity)}<span class="kind k-gap">unhandled</span></div><p>${fmt(g.text)}</p>${refLinks(g.refs)}</li>`);
   const answeredItems = [...answered].sort(byId).map((q) =>
     `<li id="${esc(q.id)}" class="ans"><div class="q-h"><span class="qid">${esc(q.id)}</span>${kindTag(q)}</div><p>${fmt(q.text)}</p><p class="answer"><span class="answer-l">Answer</span>${fmt(q.answer)}</p>${refLinks(v.refs.get(q.id) ?? [])}</li>`);
-  const totalQ = qItems.length + gapItems.length;
-  const allQ = [...openQuestions, ...v.gaps];
+  const checkItems = v.checks.map((c) => `<li id="${c.id}" class="s-${c.severity}"><div class="q-h"><span class="qid">${c.id}</span>${sevChip(c.severity)}<span class="kind k-gap">checklist</span></div><p>${fmt(c.text)}</p>${refLinks(c.refs)}</li>`);
+  const totalQ = qItems.length + gapItems.length + checkItems.length;
+  const allQ = [...openQuestions, ...auto];
   const sevSplit = Object.keys(SEVERITY)
     .map((s) => [s, allQ.filter((q) => q.severity === s).length])
     .filter(([, n]) => n)
@@ -487,6 +558,7 @@ function render(spec, v, lock, root, htmlPath) {
   <header class="top">
     <h1>${esc(meta.title)}</h1>
     <p class="meta">${v.model.length} features${planned ? ` (${planned} planned)` : ""} · ${totalQ} open questions ${sevSplit}${answered.length ? ` · ${answered.length} answered` : ""} · code at ${revLink}</p>
+    ${(() => { const list = Object.entries(meta.skips ?? {}).filter(([id]) => v.items.has(id)); return list.length ? `<p class="skips">Ruled out for every feature: ${list.map(([id, why]) => `<span><b>${fmt(v.items.get(id).label)}</b> ${fmt(why)}</span>`).join("")}</p>` : ""; })()}
     <p class="who-key">Whose condition: ${Object.entries(ACTORS).map(([a, name]) => `<span class="who w-${a}">${name}</span>`).join("")}</p>
   </header>
   ${sections}
@@ -495,6 +567,7 @@ function render(spec, v, lock, root, htmlPath) {
     <p class="sev-key">${sevKey}</p>
     ${qItems.length ? `<ol class="qs">${qItems.join("")}</ol>` : `<p class="none">None.</p>`}
     ${gapItems.length ? `<h3>Unhandled combinations</h3><ol class="qs">${gapItems.join("")}</ol>` : ""}
+    ${checkItems.length ? `<h3>Not yet checked</h3><ol class="qs">${checkItems.join("")}</ol>` : ""}
     ${answeredItems.length ? `<h3>Answered</h3><ol class="qs">${answeredItems.join("")}</ol>` : ""}
   </section>
 </main>
@@ -546,6 +619,8 @@ section.feature header p{margin:6px 0 0;color:var(--mute);max-width:72ch}
 .src a,.src span{border:1px solid var(--line);border-radius:5px;padding:1px 7px;background:var(--panel);color:var(--ink-2);text-decoration:none}
 .src a:hover{border-color:var(--line-2);color:var(--ink)}
 .src span{color:var(--mute)}
+.skips{margin:10px 0 0!important;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px}
+.skips span b{font-weight:500;color:var(--ink-2);margin-right:4px}
 
 .tbl{margin-top:22px}
 .tbl-h{display:flex;align-items:center;gap:12px;margin-bottom:10px}
@@ -833,6 +908,7 @@ function decisionPoints(root, s) {
 // live beside them when the project opts into the hook.
 const CONFIG_DIR = ".claude/rulemap";
 const CONFIG = `${CONFIG_DIR}/config.json`;
+const CHECKLIST = `${CONFIG_DIR}/checklist.json`;
 const SPEC_NAME = "rulemap.json";
 // area: one page per feature area, <dir>/<area>/rulemap.json. single: one page, <dir>/rulemap.json.
 const LAYOUTS = new Set(["area", "single"]);
@@ -964,6 +1040,7 @@ function main() {
       stamp: { type: "boolean" },
       feature: { type: "string", multiple: true },
       changed: { type: "boolean" },
+      checklist: { type: "boolean" },
       dir: { type: "string" },
       layout: { type: "string" },
       hook: { type: "string" },
@@ -985,7 +1062,9 @@ function main() {
       return 3;
     }
     const specs = findSpecs(root, cfg);
-    report(opt.json, { configured: true, ...cfg, specs }, [describeLayout(cfg), ...(specs.length ? specs.map((s) => `  ${s}`) : ["  (no pages yet)"])].join("\n"));
+    const list = readChecklist(root);
+    const checklist = list && !list.invalid && Array.isArray(list.items) ? list.items.length : null;
+    report(opt.json, { configured: true, ...cfg, checklist, specs }, [describeLayout(cfg), checklist === null ? `no ${CHECKLIST}` : `${CHECKLIST}: ${checklist} items`, ...(specs.length ? specs.map((s) => `  ${s}`) : ["  (no pages yet)"])].join("\n"));
     return 0;
   }
 
@@ -1009,13 +1088,13 @@ function main() {
   const htmlPath = path.resolve(outPath(specPath, spec, outArg));
 
   if (cmd === "validate" || cmd === "deliver") {
-    const v = validate(spec, root);
+    const v = validate(spec, root, { checklistAll: opt.checklist });
     const ok = v.errors.length === 0;
     const answered = (spec.questions ?? []).filter((q) => q.answer).length;
-    const summary = { ok, errors: v.errors, warnings: v.warnings, features: v.model.length, questions: (spec.questions ?? []).length - answered, answered, unhandled: v.gaps.length };
-    const counts = `${summary.features} features, ${summary.questions} open questions${answered ? ` (${answered} answered)` : ""}, ${summary.unhandled} unhandled`;
+    const summary = { ok, errors: v.errors, warnings: v.warnings, features: v.model.length, questions: (spec.questions ?? []).length - answered, answered, unhandled: v.gaps.length, unchecked: v.checks.length };
+    const counts = `${summary.features} features, ${summary.questions} open questions${answered ? ` (${answered} answered)` : ""}, ${summary.unhandled} unhandled${v.items.size ? `, ${summary.unchecked} not yet checked against ${CHECKLIST}` : ""}`;
     if (!ok || cmd === "validate") {
-      report(opt.json, summary, `${ok ? "valid" : "INVALID"}: ${v.errors.length} errors, ${v.warnings.length} warnings, ${counts} combinations\n${printDiagnostics(v)}`.trimEnd());
+      report(opt.json, summary, `${ok ? "valid" : "INVALID"}: ${v.errors.length} errors, ${v.warnings.length} warnings, ${counts}\n${printDiagnostics(v)}`.trimEnd());
       return ok ? 0 : 1;
     }
     const files = watchedFiles(spec, root, [specPath, htmlPath]);

@@ -51,7 +51,14 @@ the sync hook on or off.
    `rulemap.json` path, set `meta.output` to `rulemap.html` or drop it,
    delete the old HTML, and redeliver so the page and its lock are rebuilt.
 
-5. **Tell the user** in two lines what was written, and that
+5. **Offer a checklist** when `.claude/rulemap/checklist.json` does not exist
+   yet: the conditions every feature here must be checked against, and the
+   existing changes (admin tools, jobs, deletes) that reach into new features.
+   On a yes, draft it from the code — its roles, statuses and flags, and every
+   path that writes its main tables — and let the user edit the list before
+   it is used. The format is in [spec.md](spec.md).
+
+6. **Tell the user** in two lines what was written, and that
    `/rulemap:setup` (or "set up rulemap") changes it. For the team hook, say
    to commit `.claude/rulemap/` and `.claude/settings.json`. After a plugin
    upgrade, re-running setup with the same answers refreshes the hook's copy

@@ -80,6 +80,56 @@ the spec's section as a source:
 }
 ```
 
+## The project checklist
+
+`.claude/rulemap/checklist.json`, at the project root, is optional. It lists
+what every planned feature must be checked against:
+
+```jsonc
+{
+  "items": [
+    { "id": "account", "label": "Account state",
+      "ask": "Active, suspended, closed: does any of them change the outcome?" },
+    { "id": "support-refund", "label": "Support issues a refund",
+      "ask": "The admin tool can refund any order at any time. What happens to this feature when it does?" },
+    { "id": "delegated-login", "label": "Delegated login",
+      "ask": "A team member acting for the account owner." }
+  ]
+}
+```
+
+A feature settles an item by **covering** it — `"covers": "<id>"` (or a list)
+on the input or value that decides it — or by **skipping** it with the reason
+it cannot change the outcome:
+
+```jsonc
+{
+  "id": "gift-card-refunds",
+  "skips": { "delegated-login": "Only the owner can see refunds, and the admin tool is a separate feature." },
+  "tables": [
+    {
+      "id": "lifecycle",
+      "title": "Card state × what happens to it",
+      "inputs": [
+        { "id": "state", "label": "Card", "actor": "system", "covers": "account", "values": [ … ] },
+        { "id": "event", "label": "Event", "actor": "customer", "values": [
+          { "id": "redeemed", "label": "Customer redeems it" },
+          { "id": "refunded", "label": "Support refunds the order", "actor": "admin", "covers": "support-refund" } ] }
+      ], …
+    }
+  ]
+}
+```
+
+An item that cannot matter to any feature on the page — an area that exists
+in one region only, say — is ruled out once in `meta.skips`, in the same
+shape.
+
+Every item a planned feature neither covers nor skips becomes a `C1, C2…`
+entry under "Not yet checked", rated `major`, and a warning from `validate`.
+`--checklist` on `validate` or `deliver` checks built features too. A `covers`
+or `skips` id that is not in the checklist is an error.
+
 ## Rules of the format
 
 - **Actors.** `meta.actors` names the people who use the app, as
