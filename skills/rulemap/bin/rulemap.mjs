@@ -186,7 +186,7 @@ function validate(spec, root, opts = {}) {
   const pageSkips = meta.skips ?? {};
   if (typeof pageSkips !== "object" || Array.isArray(pageSkips)) err("meta.skips", "must be an object of checklist id -> reason");
   else for (const [id, why] of Object.entries(pageSkips)) {
-    if (!itemById.has(id)) err("meta.skips", checklist ? `skips "${id}", which is not in ${CHECKLIST}` : `skips "${id}", but the project has no ${CHECKLIST}`);
+    if (id !== ANY && !itemById.has(id)) err("meta.skips", checklist ? `skips "${id}", which is not in ${CHECKLIST}` : `skips "${id}", but the project has no ${CHECKLIST}`);
     else if (typeof why !== "string" || !why.trim()) err("meta.skips", `skips "${id}" without saying why it cannot matter`);
   }
 
@@ -347,14 +347,15 @@ function validate(spec, root, opts = {}) {
     const skips = f.skips ?? {};
     if (typeof skips !== "object" || Array.isArray(skips)) err(fw, `skips must be an object of checklist id -> reason`);
     else for (const [id, why] of Object.entries(skips)) {
-      if (!itemById.has(id)) err(fw, checklist ? `skips "${id}", which is not in ${CHECKLIST}` : `skips "${id}", but the project has no ${CHECKLIST}`);
+      if (id !== ANY && !itemById.has(id)) err(fw, checklist ? `skips "${id}", which is not in ${CHECKLIST}` : `skips "${id}", but the project has no ${CHECKLIST}`);
       else if (typeof why !== "string" || !why.trim()) err(fw, `skips "${id}" without saying why it cannot matter`);
       else if (covered.has(id)) warn(fw, `both covers and skips "${id}"`);
     }
     // Every item a planned feature (or, with --checklist, any feature) neither decides nor rules out.
     const fChecks = [];
     if (f.status === "planned" || opts.checklistAll) {
-      const missing = items.filter((it) => !covered.has(it.id) && !(skips && it.id in skips) && !(it.id in pageSkips));
+      const ruledOut = (list, id) => list && typeof list === "object" && (id in list || ANY in list);
+      const missing = items.filter((it) => !covered.has(it.id) && !ruledOut(skips, it.id) && !ruledOut(pageSkips, it.id));
       for (const it of missing) {
         const id = `C${checks.length + 1}`;
         checks.push({ id, severity: GAP_SEVERITY, text: `${f.name} never decides ${it.label}.${it.ask ? ` ${it.ask}` : ""}`, refs: [{ anchor: fAnchor, label: f.name }] });
@@ -500,11 +501,7 @@ function render(spec, v, lock, root, htmlPath) {
 
   const planTag = (fm) => (fm.f.status === "planned" ? `<span class="plan" title="From a spec; not built yet">planned</span>` : "");
   const planned = v.model.filter((fm) => fm.f.status === "planned").length;
-  const skipped = (fm) => {
-    const list = Object.entries(fm.skips).filter(([id]) => v.items.has(id));
-    return list.length ? `<p class="skips">Ruled out: ${list.map(([id, why]) => `<span><b>${fmt(v.items.get(id).label)}</b> ${fmt(why)}</span>`).join("")}</p>` : "";
-  };
-  const sections = v.model.map((fm) => `<section class="feature" id="${fm.anchor}"><header><h2>${fmt(fm.f.name)}${planTag(fm)}${qMark([...(fm.f.q ?? []), ...fm.checks])}</h2><p>${fmt(fm.f.summary)}</p>${fm.sources.length ? `<div class="src">${sources(fm)}</div>` : ""}${skipped(fm)}</header>${fm.tables.map(table).join("")}</section>`).join("");
+  const sections = v.model.map((fm) => `<section class="feature" id="${fm.anchor}"><header><h2>${fmt(fm.f.name)}${planTag(fm)}${qMark([...(fm.f.q ?? []), ...fm.checks])}</h2><p>${fmt(fm.f.summary)}</p>${fm.sources.length ? `<details class="src-d"><summary>Sources · ${fm.sources.length}</summary><div class="src">${sources(fm)}</div></details>` : ""}</header>${fm.tables.map(table).join("")}</section>`).join("");
 
   // Three boxes per menu row, critical → minor; an empty box stays grey.
   const sevBoxes = (ids) => {
@@ -558,7 +555,6 @@ function render(spec, v, lock, root, htmlPath) {
   <header class="top">
     <h1>${esc(meta.title)}</h1>
     <p class="meta">${v.model.length} features${planned ? ` (${planned} planned)` : ""} · ${totalQ} open questions ${sevSplit}${answered.length ? ` · ${answered.length} answered` : ""} · code at ${revLink}</p>
-    ${(() => { const list = Object.entries(meta.skips ?? {}).filter(([id]) => v.items.has(id)); return list.length ? `<p class="skips">Ruled out for every feature: ${list.map(([id, why]) => `<span><b>${fmt(v.items.get(id).label)}</b> ${fmt(why)}</span>`).join("")}</p>` : ""; })()}
     <p class="who-key">Whose condition: ${Object.entries(ACTORS).map(([a, name]) => `<span class="who w-${a}">${name}</span>`).join("")}</p>
   </header>
   ${sections}
@@ -619,8 +615,11 @@ section.feature header p{margin:6px 0 0;color:var(--mute);max-width:72ch}
 .src a,.src span{border:1px solid var(--line);border-radius:5px;padding:1px 7px;background:var(--panel);color:var(--ink-2);text-decoration:none}
 .src a:hover{border-color:var(--line-2);color:var(--ink)}
 .src span{color:var(--mute)}
-.skips{margin:10px 0 0!important;font-size:12.5px;display:flex;flex-wrap:wrap;gap:4px 14px}
-.skips span b{font-weight:500;color:var(--ink-2);margin-right:4px}
+.src-d{margin-top:8px}
+.src-d>summary{display:inline-block;cursor:pointer;font-size:12px;color:var(--faint);list-style:none}
+.src-d>summary::-webkit-details-marker{display:none}
+.src-d>summary:hover{color:var(--mute)}
+.src-d[open]>summary{color:var(--mute)}
 
 .tbl{margin-top:22px}
 .tbl-h{display:flex;align-items:center;gap:12px;margin-bottom:10px}

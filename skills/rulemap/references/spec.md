@@ -121,9 +121,11 @@ it cannot change the outcome:
 }
 ```
 
-An item that cannot matter to any feature on the page — an area that exists
-in one region only, say — is ruled out once in `meta.skips`, in the same
-shape.
+`"*"` as a key rules out every item the feature does not cover, with one
+reason — for a feature that only defines data. An item that cannot matter to
+any feature on the page — an area that exists in one region only, say — is
+ruled out once in `meta.skips`, in the same shape. Reasons are a few words,
+kept in the JSON for review; the page does not draw them.
 
 Every item a planned feature neither covers nor skips becomes a `C1, C2…`
 entry under "Not yet checked", rated `major`, and a warning from `validate`.
@@ -194,6 +196,8 @@ or `skips` id that is not in the checklist is an error.
   sentence, notes to a few words, labels to a few words.
 - **`"view": "rules"`** on a two-input table forces the rules layout.
 - **Size.** Warns above 64 combinations; split the table instead.
+- **On the page**, each feature is its name, summary and tables. Sources fold
+  into a "Sources · n" line that opens on click.
 - **Sources** are code or documents. `path` must exist in the working tree;
   `symbol`, if given, must appear in it — a function or constant name in
   code, the heading line of a section in a document (`"## Refunds"`). For a

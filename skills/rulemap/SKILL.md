@@ -287,8 +287,12 @@ question to put to each feature. The format is in
 
 A planned feature settles each item by covering it (an input or value with
 `"covers": "<id>"`) or ruling it out (`"skips": { "<id>": "why it cannot
-matter" }`). An item that cannot matter anywhere on the page is ruled out
-once, in `meta.skips`. Anything left becomes a `C` entry under "Not yet
+matter" }`). Keep each reason to a few words. A feature that only defines
+data — a catalog entry, copy, a constant — rules out everything it does not
+cover with one entry, `"skips": { "*": "defines the catalog only" }`, rather
+than repeating a sentence per item. An item that cannot matter anywhere on
+the page is ruled out once, in `meta.skips`. Ruled-out items stay in the JSON
+and are not drawn on the page, which shows only what is decided or open. Anything left becomes a `C` entry under "Not yet
 checked" on the page. `validate --checklist` applies the same check to built
 features.
 
