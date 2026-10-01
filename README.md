@@ -27,9 +27,11 @@ and open at the function's line.
 **Plan — how a feature should behave, before it's built.** "Plan gift cards
 from `docs/features/gift-cards/spec.md`", or point it at a folder of specs,
 or just describe the feature. Reads the spec and the existing code it will
-touch. Every combination the spec doesn't decide stays a dashed `?` cell:
-the list of decisions to make before anyone writes code. When the feature
-ships, the planned tables are checked against the real code.
+touch. Every combination the spec doesn't decide stays a dashed `?` cell,
+and Claude then asks you about each one, with its recommendation first.
+Answers become rules and are kept on the page as the record of what was
+decided; your spec is only read, never edited. When the feature ships, the
+planned tables are checked against the real code.
 
 ## Install
 

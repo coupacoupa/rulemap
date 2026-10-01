@@ -155,6 +155,7 @@ function validate(spec, root) {
   for (const q of questions) {
     if (!q.text) err(`questions[${q.id}]`, "needs text");
     if (!(q.severity in SEVERITY)) err(`questions[${q.id}]`, `severity must be one of ${Object.keys(SEVERITY).join(", ")}`);
+    if (q.answer !== undefined && (typeof q.answer !== "string" || !q.answer.trim())) err(`questions[${q.id}]`, "answer must be text; leave it out while the question is open");
   }
 
   const features = spec.features ?? [];
@@ -186,7 +187,7 @@ function validate(spec, root) {
       if (!s.path) { err(sw, "needs a path"); continue; }
       const abs = path.join(root, s.path);
       if (!existsSync(abs)) { err(sw, `${s.path} does not exist`); continue; }
-      if (s.symbol && !readFileSync(abs, "utf8").includes(s.symbol)) err(sw, `"${s.symbol}" is not in ${s.path}`);
+      if (s.symbol && symbolLine(s.path, readFileSync(abs, "utf8"), s.symbol) === null) err(sw, `"${s.symbol}" is not in ${s.path}`);
       let line = null;
       let pinned = false;
       if (rev) {
@@ -195,10 +196,7 @@ function validate(spec, root) {
           if (meta.repository?.url) warn(sw, `${s.path} is not in ${rev.slice(0, 7)}; it links to the local file until committed and stamped`);
         } else {
           pinned = true;
-          if (s.symbol) {
-            const n = atRev.split("\n").findIndex((l) => l.includes(s.symbol));
-            if (n >= 0) line = n + 1;
-          }
+          if (s.symbol) line = symbolLine(s.path, atRev, s.symbol);
         }
       }
       sources.push({ ...s, line, pinned });
@@ -323,17 +321,29 @@ function render(spec, v, lock, root, htmlPath) {
     ? `${base}/blob/${rev}/${s.path}${s.line ? `#L${s.line}` : ""}`
     : encodeURI(path.relative(path.dirname(htmlPath), path.join(root, s.path)).split(path.sep).join("/")));
   const qById = new Map((spec.questions ?? []).map((q) => [q.id, q]));
+  // An answered question stays on the page as the record of a decision, but is no longer open.
+  const answered = (spec.questions ?? []).filter((q) => q.answer);
+  const isOpen = (id) => !qById.get(id)?.answer;
+  const openQuestions = (spec.questions ?? []).filter((q) => !q.answer);
 
-  const sevById = new Map([...(spec.questions ?? []).map((q) => [q.id, q.severity]), ...v.gaps.map((g) => [g.id, g.severity])]);
+  const sevById = new Map([...openQuestions.map((q) => [q.id, q.severity]), ...v.gaps.map((g) => [g.id, g.severity])]);
   const worst = (ids) => ids.map((id) => sevById.get(id)).filter((s) => s in SEVERITY).sort((a, b) => SEVERITY[a].rank - SEVERITY[b].rank)[0] ?? "minor";
   const sevChip = (s) => `<span class="sev s-${esc(s)}">${esc(SEVERITY[s]?.label ?? s)}</span>`;
   const bySeverity = (a, b) => (SEVERITY[a.severity]?.rank ?? 9) - (SEVERITY[b.severity]?.rank ?? 9) || a.id.localeCompare(b.id, undefined, { numeric: true });
+  const byId = (a, b) => a.id.localeCompare(b.id, undefined, { numeric: true });
 
   const qMark = (ids) => ids.map((id) => {
+    const q = qById.get(id);
+    if (q?.answer) return `<a class="qm ans" href="#${esc(id)}" title="${esc(`Answered: ${q.answer}`)}">${esc(id)}</a>`;
     const s = sevById.get(id);
-    const text = qById.get(id)?.text ?? v.gaps.find((g) => g.id === id)?.text ?? "";
+    const text = q?.text ?? v.gaps.find((g) => g.id === id)?.text ?? "";
     return `<a class="qm s-${esc(s)}" href="#${esc(id)}" title="${esc(`${SEVERITY[s]?.label ?? ""}: ${text}`)}">${esc(id)}</a>`;
   }).join("");
+  // The outline a cell or row gets for its questions: only open ones count.
+  const qClass = (ids) => {
+    const open = (ids ?? []).filter(isOpen);
+    return open.length ? `has-q s-${worst(open)}` : "";
+  };
   const chip = (out, valId) => {
     const val = out.values.find((x) => x.id === valId);
     return `<span class="chip t-${esc(val?.tone ?? "neutral")}">${fmt(val?.label ?? valId)}</span>`;
@@ -356,7 +366,7 @@ function render(spec, v, lock, root, htmlPath) {
       for (const r of tm.rules) for (const q of r.q ?? []) ids.add(q);
       for (const c of tm.cells) if (c.gap) ids.add(c.gap);
     }
-    return [...ids];
+    return [...ids].filter(isOpen);
   };
 
   const legend = (tm) => {
@@ -392,14 +402,15 @@ function render(spec, v, lock, root, htmlPath) {
       const title = r.note ? ` title="${esc(r.note)}"` : "";
       if (r.impossible) return `<td id="${c.anchor}" class="cell imp"${title}><span class="na">n/a</span>${marks}</td>`;
       const tone = tm.outputs.length === 1 ? ` tone t-${esc(tm.outputs[0].values.find((x) => x.id === r.then[tm.outputs[0].id])?.tone ?? "neutral")}` : " multi";
-      return `<td id="${c.anchor}" class="cell${tone}${r.q?.length ? ` has-q s-${worst(r.q)}` : ""}"${title}>${tm.outputs.map((o) => chip(o, r.then[o.id])).join("")}${marks}</td>`;
+      const q = qClass(r.q);
+      return `<td id="${c.anchor}" class="cell${tone}${q ? ` ${q}` : ""}"${title}>${tm.outputs.map((o) => chip(o, r.then[o.id])).join("")}${marks}</td>`;
     }).join("")}</tr>`).join("");
     return `<div class="gridbox"><div class="scroll"><table class="grid"><thead>${head}</thead><tbody>${body}</tbody></table></div>${legend(tm)}</div>`;
   };
 
   const rulesView = (tm) => {
     const head = `<tr><th class="num">#</th>${tm.inputs.map((x) => `<th>${who(x)}${fmt(x.label)}</th>`).join("")}${tm.outputs.map((o, i) => `<th class="out${i === 0 ? " first" : ""}">${fmt(o.label)}</th>`).join("")}<th class="note">Note</th></tr>`;
-    const rows = tm.rules.map((r, i) => `<tr id="${tm.anchor}-r${i + 1}" class="${r.q?.length ? `has-q s-${worst(r.q)}` : ""}${r.impossible ? " imp-row" : ""}"><td class="num">${i + 1}</td>${tm.inputs.map((x) => `<td>${cond(x, r.when?.[x.id])}</td>`).join("")}${
+    const rows = tm.rules.map((r, i) => `<tr id="${tm.anchor}-r${i + 1}" class="${qClass(r.q)}${r.impossible ? " imp-row" : ""}"><td class="num">${i + 1}</td>${tm.inputs.map((x) => `<td>${cond(x, r.when?.[x.id])}</td>`).join("")}${
       r.impossible
         ? `<td class="out first na" colspan="${tm.outputs.length}">can't happen</td>`
         : tm.outputs.map((o, k) => `<td class="out${k === 0 ? " first" : ""}">${chip(o, r.then[o.id])}</td>`).join("")
@@ -439,13 +450,15 @@ function render(spec, v, lock, root, htmlPath) {
     return `${g.label ? `<div class="nav-g">${fmt(g.label)}</div>` : ""}${items.map(navItem).join("")}`;
   }).join("");
 
-  const qItems = [...(spec.questions ?? [])].sort(bySeverity).map((q) => {
-    const refs = v.refs.get(q.id) ?? [];
-    return `<li id="${esc(q.id)}" class="s-${esc(q.severity)}"><div class="q-h"><span class="qid">${esc(q.id)}</span>${sevChip(q.severity)}${q.kind ? `<span class="kind k-${esc(q.kind)}">${esc(q.kind)}</span>` : ""}</div><p>${fmt(q.text)}</p>${refs.length ? `<div class="refs">${refs.map((r) => `<a href="#${r.anchor}">↑ ${fmt(r.label)}</a>`).join("")}</div>` : ""}</li>`;
-  });
-  const gapItems = v.gaps.map((g) => `<li id="${g.id}" class="s-${g.severity}"><div class="q-h"><span class="qid">${g.id}</span>${sevChip(g.severity)}<span class="kind k-gap">unhandled</span></div><p>${fmt(g.text)}</p><div class="refs">${g.refs.map((r) => `<a href="#${r.anchor}">↑ ${fmt(r.label)}</a>`).join("")}</div></li>`);
+  const refLinks = (refs) => (refs.length ? `<div class="refs">${refs.map((r) => `<a href="#${r.anchor}">↑ ${fmt(r.label)}</a>`).join("")}</div>` : "");
+  const kindTag = (q) => (q.kind ? `<span class="kind k-${esc(q.kind)}">${esc(q.kind)}</span>` : "");
+  const qItems = [...openQuestions].sort(bySeverity).map((q) =>
+    `<li id="${esc(q.id)}" class="s-${esc(q.severity)}"><div class="q-h"><span class="qid">${esc(q.id)}</span>${sevChip(q.severity)}${kindTag(q)}</div><p>${fmt(q.text)}</p>${refLinks(v.refs.get(q.id) ?? [])}</li>`);
+  const gapItems = v.gaps.map((g) => `<li id="${g.id}" class="s-${g.severity}"><div class="q-h"><span class="qid">${g.id}</span>${sevChip(g.severity)}<span class="kind k-gap">unhandled</span></div><p>${fmt(g.text)}</p>${refLinks(g.refs)}</li>`);
+  const answeredItems = [...answered].sort(byId).map((q) =>
+    `<li id="${esc(q.id)}" class="ans"><div class="q-h"><span class="qid">${esc(q.id)}</span>${kindTag(q)}</div><p>${fmt(q.text)}</p><p class="answer"><span class="answer-l">Answer</span>${fmt(q.answer)}</p>${refLinks(v.refs.get(q.id) ?? [])}</li>`);
   const totalQ = qItems.length + gapItems.length;
-  const allQ = [...(spec.questions ?? []), ...v.gaps];
+  const allQ = [...openQuestions, ...v.gaps];
   const sevSplit = Object.keys(SEVERITY)
     .map((s) => [s, allQ.filter((q) => q.severity === s).length])
     .filter(([, n]) => n)
@@ -473,7 +486,7 @@ function render(spec, v, lock, root, htmlPath) {
 <main>
   <header class="top">
     <h1>${esc(meta.title)}</h1>
-    <p class="meta">${v.model.length} features${planned ? ` (${planned} planned)` : ""} · ${totalQ} open questions ${sevSplit} · code at ${revLink}</p>
+    <p class="meta">${v.model.length} features${planned ? ` (${planned} planned)` : ""} · ${totalQ} open questions ${sevSplit}${answered.length ? ` · ${answered.length} answered` : ""} · code at ${revLink}</p>
     <p class="who-key">Whose condition: ${Object.entries(ACTORS).map(([a, name]) => `<span class="who w-${a}">${name}</span>`).join("")}</p>
   </header>
   ${sections}
@@ -482,6 +495,7 @@ function render(spec, v, lock, root, htmlPath) {
     <p class="sev-key">${sevKey}</p>
     ${qItems.length ? `<ol class="qs">${qItems.join("")}</ol>` : `<p class="none">None.</p>`}
     ${gapItems.length ? `<h3>Unhandled combinations</h3><ol class="qs">${gapItems.join("")}</ol>` : ""}
+    ${answeredItems.length ? `<h3>Answered</h3><ol class="qs">${answeredItems.join("")}</ol>` : ""}
   </section>
 </main>
 <script type="application/json" id="${LOCK_ID}">${JSON.stringify(lock).replace(/</g, "\\u003c")}</script>
@@ -630,6 +644,9 @@ tr:target>td{box-shadow:inset 0 1px 0 var(--ring),inset 0 -1px 0 var(--ring)}
 .qs li.s-major{box-shadow:inset 2px 0 0 var(--s-major)}
 .qs li.s-minor{box-shadow:inset 2px 0 0 var(--s-minor)}
 .qs li p{margin:6px 0 0;max-width:80ch;color:var(--ink-2)}
+.qs li.ans p:not(.answer){color:var(--mute)}
+.qs li p.answer{color:var(--ink)}
+.answer-l{font:500 10.5px/1.5 var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--faint);margin-right:8px}
 .q-h{display:flex;gap:8px;align-items:center}
 .qid{font:600 12px var(--mono)}
 .kind{font:11px/1.6 var(--mono);padding:0 6px;border-radius:4px;border:1px solid var(--line);color:var(--mute)}
@@ -696,32 +713,118 @@ const HEADING = /^(#{1,6})\s/;
 // A line of a spec that decides something: a condition, a limit, a number, or a row of a table.
 const DECISION_PROSE = /\b(if|unless|when|whenever|only|except|otherwise|else|must|cannot|can't|never|always|before|after|until|within|at (least|most)|more than|less than|fewer than|up to|over|under|above|below|exceeds?|expires?|allowed|refused?|rejected?|requires?|eligible|either|neither|depends)\b|\d+\s*(%|mins?|minutes?|hours?|days?|weeks?|months?|years?)\b|[<>≤≥]=?\s*\d|[$€£¥]\s?\d|^\s*\|(?!\s*:?-{3})/i;
 
+// An HTML document (an exported spec, a wiki page) is prose too, read as its visible text.
+const HTML_DOC = /\.(html?|xhtml)$/i;
+const BLOCK_TAGS = new Set(["p", "div", "section", "article", "header", "footer", "main", "aside", "nav", "li", "ul", "ol", "dl", "dt", "dd", "tr", "table", "thead", "tbody", "tfoot", "caption", "blockquote", "pre", "figure", "figcaption", "details", "summary", "br", "hr"]);
+const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", ndash: "–", mdash: "—", hellip: "…", lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", times: "×", le: "≤", ge: "≥" };
+const decodeEntities = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+  if (e[0] !== "#") return ENTITIES[e.toLowerCase()] ?? m;
+  const n = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+  return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+});
+
+// The visible text of an HTML page, one entry per block with the line it starts
+// on. Headings read as "## Heading" and table rows as "| a | b |", so a section
+// and its decision lines are found the same way as in markdown.
+function htmlBlocks(raw) {
+  const blank = (m) => m.replace(/[^\n]/g, " "); // keeps line numbers
+  const src = raw.replace(/<!--[\s\S]*?-->/g, blank).replace(/<(script|style|template|noscript|svg)\b[\s\S]*?<\/\1\s*>/gi, blank);
+  const blocks = [];
+  let text = "";
+  let start = 1;
+  let line = 1;
+  let heading = 0;
+  let row = false;
+  const newlines = (s) => s.match(/\n/g)?.length ?? 0;
+  const flush = () => {
+    const t = decodeEntities(text).replace(/\s+/g, " ").trim();
+    if (t) blocks.push({ line: start, text: heading ? `${"#".repeat(heading)} ${t}` : row ? `| ${t} |` : t });
+    text = "";
+    heading = 0;
+    row = false;
+  };
+  const addText = (chunk) => {
+    if (!text.trim()) {
+      const k = chunk.search(/\S/);
+      if (k >= 0) start = line + newlines(chunk.slice(0, k));
+    }
+    text += chunk;
+    line += newlines(chunk);
+  };
+  const TAG = /<(\/?)([a-z][a-z0-9]*)\b[^>]*>/gi;
+  let at = 0;
+  for (let m; (m = TAG.exec(src)); at = TAG.lastIndex) {
+    addText(src.slice(at, m.index));
+    const [tag, close, name] = [m[0], m[1], m[2].toLowerCase()];
+    const level = /^h([1-6])$/.exec(name)?.[1];
+    if (level) { flush(); if (!close) heading = Number(level); }
+    else if (name === "td" || name === "th") { if (!close) { if (row && text.trim()) text += " | "; row = true; } }
+    else if (BLOCK_TAGS.has(name)) flush();
+    line += newlines(tag);
+  }
+  addText(src.slice(at));
+  flush();
+  return blocks;
+}
+
+// A document's lines as the audit reads them, each with its line in the file.
+const docLines = (file, content) => (HTML_DOC.test(file) ? htmlBlocks(content) : content.split(/\r?\n/).map((text, i) => ({ line: i + 1, text })));
+
+// Where a cited symbol is: its index in the lines, preferring a heading in an HTML page.
+function findSymbol(file, entries, symbol) {
+  if (HTML_DOC.test(file)) {
+    const bare = symbol.replace(/^#+\s*/, "");
+    const h = entries.findIndex((e) => HEADING.test(e.text) && e.text.includes(bare));
+    if (h >= 0) return h;
+  }
+  return entries.findIndex((e) => e.text.includes(symbol));
+}
+
+// The file line a symbol sits on, or null when it is not there. An HTML page is
+// matched on its visible text first, then on its source.
+function symbolLine(file, content, symbol) {
+  const entries = docLines(file, content);
+  const i = findSymbol(file, entries, symbol);
+  if (i >= 0) return entries[i].line;
+  if (!HTML_DOC.test(file)) return null;
+  const n = content.split(/\r?\n/).findIndex((l) => l.includes(symbol));
+  return n >= 0 ? n + 1 : null;
+}
+
 // Decision points in a cited source: within the cited symbol's declaration
 // (or, in a document, the cited heading's section) when there is one,
 // otherwise the whole file (route handlers are short).
 function decisionPoints(root, s) {
   const abs = path.join(root, s.path);
   if (!existsSync(abs)) return { path: s.path, symbol: s.symbol ?? null, missing: true, points: [] };
-  const src = readFileSync(abs, "utf8").split(/\r?\n/);
-  const prose = PROSE.test(s.path);
+  const content = readFileSync(abs, "utf8");
+  const entries = docLines(s.path, content);
+  const lastLine = content.split(/\r?\n/).length;
+  const prose = PROSE.test(s.path) || HTML_DOC.test(s.path);
   let from = 0;
-  let to = src.length;
+  let to = entries.length;
   if (s.symbol) {
-    const start = src.findIndex((l) => l.includes(s.symbol));
+    const start = findSymbol(s.path, entries, s.symbol);
     if (start >= 0) {
       from = start;
       // A section runs to the next heading at its level or above; a symbol that is not a heading, to the next heading.
-      const level = src[start].match(HEADING)?.[1].length ?? 7;
+      const level = entries[start].text.match(HEADING)?.[1].length ?? 7;
       const next = prose
-        ? src.findIndex((l, i) => i > start && (l.match(HEADING)?.[1].length ?? 99) <= level)
-        : src.findIndex((l, i) => i > start && TOP_LEVEL.test(l));
-      to = next < 0 ? src.length : next;
+        ? entries.findIndex((e, i) => i > start && (e.text.match(HEADING)?.[1].length ?? 99) <= level)
+        : entries.findIndex((e, i) => i > start && TOP_LEVEL.test(e.text));
+      to = next < 0 ? entries.length : next;
+    } else if (HTML_DOC.test(s.path)) {
+      // In the page's source but not its visible text: drawn by a script, or inside an attribute.
+      const line = symbolLine(s.path, content, s.symbol);
+      if (line !== null) return { path: s.path, symbol: s.symbol, from: line, to: line, points: [], unreadable: "not in the page's visible text (drawn by a script?); read this section yourself" };
     }
   }
   const test = prose ? DECISION_PROSE : DECISION;
   const points = [];
-  for (let i = from; i < to; i++) if (test.test(src[i])) points.push({ line: i + 1, code: src[i].trim().slice(0, 160) });
-  return { path: s.path, symbol: s.symbol ?? null, from: from + 1, to, points };
+  for (let i = from; i < to; i++) if (test.test(entries[i].text)) points.push({ line: entries[i].line, code: entries[i].text.trim().slice(0, 160) });
+  const fromLine = entries[from]?.line ?? 1;
+  const toLine = to < entries.length ? Math.max(fromLine, entries[to].line - 1) : lastLine;
+  return { path: s.path, symbol: s.symbol ?? null, from: fromLine, to: toLine, points };
 }
 
 // ---------------------------------------------------------------- setup
@@ -908,9 +1011,11 @@ function main() {
   if (cmd === "validate" || cmd === "deliver") {
     const v = validate(spec, root);
     const ok = v.errors.length === 0;
-    const summary = { ok, errors: v.errors, warnings: v.warnings, features: v.model.length, questions: (spec.questions ?? []).length, unhandled: v.gaps.length };
+    const answered = (spec.questions ?? []).filter((q) => q.answer).length;
+    const summary = { ok, errors: v.errors, warnings: v.warnings, features: v.model.length, questions: (spec.questions ?? []).length - answered, answered, unhandled: v.gaps.length };
+    const counts = `${summary.features} features, ${summary.questions} open questions${answered ? ` (${answered} answered)` : ""}, ${summary.unhandled} unhandled`;
     if (!ok || cmd === "validate") {
-      report(opt.json, summary, `${ok ? "valid" : "INVALID"}: ${v.errors.length} errors, ${v.warnings.length} warnings, ${summary.features} features, ${summary.questions} questions, ${summary.unhandled} unhandled combinations\n${printDiagnostics(v)}`.trimEnd());
+      report(opt.json, summary, `${ok ? "valid" : "INVALID"}: ${v.errors.length} errors, ${v.warnings.length} warnings, ${counts} combinations\n${printDiagnostics(v)}`.trimEnd());
       return ok ? 0 : 1;
     }
     const files = watchedFiles(spec, root, [specPath, htmlPath]);
@@ -920,7 +1025,7 @@ function main() {
     writeFileSync(tmp, html);
     renameSync(tmp, htmlPath);
     report(opt.json, { ...summary, output: htmlPath, bytes: Buffer.byteLength(html), specSha256: sha, tracked: files.length },
-      `delivered ${path.relative(process.cwd(), htmlPath)} (${summary.features} features, ${summary.questions} questions, ${summary.unhandled} unhandled, tracking ${files.length} files)\n${printDiagnostics(v)}`.trimEnd());
+      `delivered ${path.relative(process.cwd(), htmlPath)} (${counts}, tracking ${files.length} files)\n${printDiagnostics(v)}`.trimEnd());
     return 0;
   }
 
@@ -943,7 +1048,7 @@ function main() {
       uncited: extra,
     };
     const block = (d) => [
-      `${d.path}${d.symbol ? ` · ${d.symbol}` : ""}${d.missing ? "  (missing)" : `  lines ${d.from}–${d.to}, ${d.points.length} decision points`}`,
+      `${d.path}${d.symbol ? ` · ${d.symbol}` : ""}${d.missing ? "  (missing)" : d.unreadable ? `  line ${d.from}: ${d.unreadable}` : `  lines ${d.from}–${d.to}, ${d.points.length} decision points`}`,
       ...d.points.map((p) => `  ${String(p.line).padStart(5)}  ${p.code}`),
     ];
     const human = [];

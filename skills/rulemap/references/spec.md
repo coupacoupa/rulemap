@@ -53,7 +53,9 @@
   ],
   "questions": [
     { "id": "Q1", "severity": "major", "kind": "clarify", "text": "Should day 15 count as inside the free window? The check uses `<` against 14 days." },
-    { "id": "Q2", "severity": "minor", "kind": "conflict", "text": "The help page promises 60-day refunds; the code stops at 30." }
+    { "id": "Q2", "severity": "minor", "kind": "conflict", "text": "The help page promises 60-day refunds; the code stops at 30." },
+    { "id": "Q3", "severity": "major", "kind": "gap", "text": "Shipped and 15–30 days old: refund shown, or sent to the seller?",
+      "answer": "Sent to the seller, who has 3 days to approve." }   // settled: kept as the record
   ]
 }
 ```
@@ -116,6 +118,12 @@ the spec's section as a source:
 - **Questions.** `q` on a rule highlights that rule's row and each of its grid
   cells with a link to the question; the question links back. `q` on a feature
   marks its heading. Ids are `Q<n>`; `kind` is `gap | clarify | conflict | bug`.
+- **Answers.** A question with an `answer` is settled. It is listed under
+  Answered, apart from the open questions, with the answer beneath it; its
+  marks turn grey, and it no longer outlines cells or counts toward open
+  questions and severity. Keep answered questions as the record of what was
+  decided, with `q` still on the rules they produced; delete one only when the
+  case it describes no longer exists.
 - **Severity** is required on every question and colours its badges, the
   outline of the cells it marks, the feature's menu count (worst wins), and
   its place in the list (worst first):
@@ -141,7 +149,9 @@ the spec's section as a source:
   code, the heading line of a section in a document (`"## Refunds"`). For a
   document, `branches` lists the decision-bearing lines of that section
   (conditions, limits, numbers, table rows) up to the next heading at the
-  same level. Links open on the code host at the pinned revision
+  same level. Markdown, text and HTML are read as documents; in an HTML page
+  the symbol is a heading's visible text (`"Refunds & returns"`, or
+  `"## Refunds & returns"` for an `<h2>`), and scripts and styles are skipped. Links open on the code host at the pinned revision
   (GitHub-style `/blob/<sha>/<path>#L<n>`) when `meta.repository.url` is set
   and the file is committed there; otherwise they point at the local file,
   relative to the page. `label` overrides the link text.

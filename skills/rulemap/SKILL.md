@@ -1,6 +1,6 @@
 ---
 name: rulemap
-description: Map an app's business rules as decision tables — condition axes (e.g. order paid / shipped / refunded × age ≤ 14 / 15–30 / > 30 days) against the outcome (refund shown / needs seller / hidden) — either from the existing code (Map) or from a spec, PRD or described feature before it is built (Plan). Tags whose condition each input is and links gaps, bugs and unclear rules to severity-rated questions. Use when the user asks to map, document, audit or explain business rules or feature behaviour, asks "what happens when…" across combinations, wants to plan a new feature or review a spec for missing cases, points at a file or folder to pull rules out of, or when code changes and a rulemap page must be updated.
+description: Map an app's business rules as decision tables — condition axes (e.g. order paid / shipped / refunded × age ≤ 14 / 15–30 / > 30 days) against the outcome (refund shown / needs seller / hidden) — either from the existing code (Map) or from a spec, PRD or described feature before it is built (Plan), then asks the user about every combination the source leaves open. Tags whose condition each input is and links gaps, bugs and unclear rules to severity-rated questions. Use when the user asks to map, document, audit or explain business rules or feature behaviour, asks "what happens when…" across combinations, wants to plan a new feature or review a spec for missing cases, points at a file or folder to pull rules out of, or when code changes and a rulemap page must be updated.
 ---
 
 # rulemap
@@ -129,9 +129,11 @@ map the code and plan what the spec adds on top, and say which is which.
    every actor who could trigger the rule, time edges (midnight, time zones,
    expiry), repeats and races. The silent axes are where plans fail.
 4. **Encode only what the spec decides.** Leave every combination it does not
-   decide uncovered: the dashed `?` cells are the plan's main output, the
-   decisions still to make. Don't fill them with what seems sensible; put a
-   recommendation in a question instead.
+   decide uncovered, however obvious the answer seems: the dashed `?` cells
+   are the plan's main output, the decisions still to make, and they are the
+   user's to make. Don't fill them with what seems sensible, and don't settle
+   them in a document of your own and then cite it; your recommendation goes
+   into the question you ask.
 5. **Questions:** `gap` for a whole missing axis or path, `clarify` for vague
    words (soon, recent, large, "admins"), `conflict` when the spec contradicts
    itself, the existing code or another page, `bug` for a rule that would do
@@ -139,12 +141,41 @@ map the code and plan what the spec adds on top, and say which is which.
    impact if built exactly as written.
 6. **Audit the spec:** `node "$DT" branches <spec> --feature <id>` lists every
    decision-bearing line in the cited sections — conditions, limits, numbers,
-   table rows. Each becomes a rule, an input value, or a question.
-7. `deliver` (`--stamp` inside a git repository). Report the page, then the
-   open decisions, worst first.
+   table rows — in markdown, text and HTML documents. Each becomes a rule, an
+   input value, or a question. When it says a section is not in a page's
+   visible text (a page drawn by a script), read that section yourself.
+7. `deliver` (`--stamp` inside a git repository), then **ask** — see below.
+   Report what was decided and what is still open, worst first.
 
-As the user answers, turn each answer into a rule, delete its question,
-redeliver, and offer to write the decision back into the spec.
+The spec, PRD or notes belong to the user: read them, never edit them. What is
+decided while planning is kept on the page, as the next section describes.
+
+## Asking, and keeping the answers
+
+A plan is not done when the page is written; it is done when the user has
+decided what it leaves open, or chosen to leave the rest for later.
+
+1. **Settle what the project already decided.** Before asking, look for an
+   answer the user or project has already given: another spec or doc, an
+   earlier answered question on any page, behaviour the code already ships
+   on purpose. Cite it as a source and write the rule. Only what nothing
+   decides goes to the user; a long list of questions wears them out.
+2. **Ask every remaining decision** — each `?` cell and each question — worst
+   first, in batches with the AskUserQuestion tool (up to four per call; where
+   it is unavailable, a numbered list in chat). Name the exact case, offer the
+   concrete outcomes as options with your recommendation first and marked
+   "(Recommended)", and let one question settle every cell it covers. Stop when
+   the user says to; what is left stays open on the page.
+3. **Keep each answer on the page.** Write the rule, set the question's
+   `answer` to what was decided, and keep its `q` on the rules it produced.
+   For a `?` cell, add a question naming the combination first, so the decision
+   has a record. An answered question stays, listed apart from the open ones,
+   so reading the spec again later does not raise it a second time.
+4. `deliver` again.
+
+The same holds in Map mode: when the user says a questioned behaviour is
+intended, answer the question rather than deleting it, so the next audit does
+not report it again.
 
 ## When a planned feature ships
 
@@ -165,8 +196,10 @@ drop `"status": "planned"`. Keep the spec as a source while it is maintained.
    - **HTML behind the spec** — the JSON was edited without a deliver.
 2. Edit only what changed. Keep feature, table and value ids stable so links
    and question numbers do not churn; append new questions with the next free
-   number, delete questions the change answered, and re-rate any whose impact
-   changed.
+   number, delete open questions the change resolved, and re-rate any whose
+   impact changed. Keep answered questions: when a changed spec or code now
+   contradicts an answer, open a new `conflict` question naming both rather
+   than overwriting either.
 3. `deliver --stamp`. It records the new hashes, so `stale` is clean
    afterwards, even for uncommitted changes. Source links fall back to the
    local file until it is committed and stamped again.
@@ -214,5 +247,6 @@ reviewed: never deliver just to quiet it.
 ## Output
 
 Return the page path, the feature / question / unhandled counts from
-`deliver`, and any warnings left as gaps. For a plan, lead with the open
-decisions, worst first. Never describe a non-zero `deliver` as success.
+`deliver`, and any warnings left as gaps. For a plan, lead with what the user
+decided, then what is still open, worst first. Never describe a non-zero
+`deliver` as success.

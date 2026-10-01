@@ -7,7 +7,7 @@
       "name": "rulemap",
       "source": "./",
       "description": "Map an app's business rules as decision tables, from code or from a spec, and surface every combination nobody decided.",
-      "version": "1.1.0"
+      "version": "1.2.0"
     }
   ]
 }
